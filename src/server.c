@@ -6,11 +6,15 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "utils.h"
+#include "http_parser.h"
+#include "http_reader.h"
+#include "http_request.h"
+#include "http_response.h"
 
 /*
  * Kernel-level backlog of fully-established connections waiting for
@@ -21,13 +25,8 @@
  */
 #define SERVER_LISTEN_BACKLOG 128
 
-/*
- * Fixed response body sent for every connection in this stage. There is no
- * HTTP parsing yet - server_run() below exists only to prove the accept
- * loop and socket plumbing work end-to-end. Real per-request responses
- * begin once the HTTP parser and router exist (see docs/roadmap.md).
- */
-#define STAGE1_RESPONSE_BODY "CinderHTTP works!\n"
+#define STAGE2_GET_BODY "CinderHTTP request parsed successfully.\n"
+#define STAGE2_POST_BODY "POST request parsed successfully.\n"
 
 /*
  * Set by the signal handler, polled by the accept loop. sig_atomic_t is the
@@ -112,37 +111,8 @@ int server_create_listening_socket(const server_config_t *config) {
     return listen_fd;
 }
 
-/*
- * Sends the fixed Stage 1 response and closes the connection. The
- * Content-Length header is computed from strlen(STAGE1_RESPONSE_BODY)
- * rather than written as a separate literal, so the header can never drift
- * out of sync with the body it describes.
- */
-static void handle_client_stage1(int client_fd) {
-    char response[256];
-    int response_len = snprintf(response, sizeof(response),
-                                 "HTTP/1.1 200 OK\r\n"
-                                 "Server: CinderHTTP/1.0\r\n"
-                                 "Content-Type: text/plain\r\n"
-                                 "Content-Length: %zu\r\n"
-                                 "Connection: close\r\n"
-                                 "\r\n"
-                                 "%s",
-                                 strlen(STAGE1_RESPONSE_BODY), STAGE1_RESPONSE_BODY);
-
-    if (response_len > 0 && (size_t)response_len < sizeof(response)) {
-        if (send_all(client_fd, response, (size_t)response_len) < 0) {
-            perror("cinderhttp: send_all");
-        }
-    } else {
-        fprintf(stderr, "cinderhttp: stage-1 response did not fit in its buffer\n");
-    }
-
-    close(client_fd);
-}
-
 static void log_connection_if_verbose(const server_config_t *config,
-                                       const struct sockaddr_in *addr) {
+                                      const struct sockaddr_in *addr) {
     if (!config->verbose) {
         return;
     }
@@ -153,6 +123,155 @@ static void log_connection_if_verbose(const server_config_t *config,
     }
 
     fprintf(stderr, "[verbose] connection from %s:%u\n", ip, ntohs(addr->sin_port));
+}
+
+static int status_for_read_result(http_read_result_t result) {
+    switch (result) {
+        case HTTP_READ_TOO_LARGE:
+            return 413;
+        case HTTP_READ_UNSUPPORTED_TRANSFER_ENCODING:
+            return 501;
+        case HTTP_READ_INVALID_CONTENT_LENGTH:
+        case HTTP_READ_BAD_REQUEST:
+            return 400;
+        case HTTP_READ_OUT_OF_MEMORY:
+            return 500;
+        default:
+            return 400;
+    }
+}
+
+static int status_for_parse_result(http_parse_result_t result) {
+    switch (result) {
+        case HTTP_PARSE_OK:
+            return 200;
+        case HTTP_PARSE_UNSUPPORTED_METHOD:
+            return 405;
+        case HTTP_PARSE_UNSUPPORTED_VERSION:
+            return 505;
+        case HTTP_PARSE_TOO_LARGE:
+            return 413;
+        case HTTP_PARSE_TOO_MANY_HEADERS:
+            return 400;
+        case HTTP_PARSE_INVALID_CONTENT_LENGTH:
+            return 400;
+        case HTTP_PARSE_UNSUPPORTED_TRANSFER_ENCODING:
+            return 501;
+        case HTTP_PARSE_OUT_OF_MEMORY:
+            return 500;
+        case HTTP_PARSE_BAD_REQUEST:
+        default:
+            return 400;
+    }
+}
+
+static const char *error_body_for_status(int status) {
+    switch (status) {
+        case 400:
+            return "Bad Request\n";
+        case 405:
+            return "Method Not Allowed\n";
+        case 413:
+            return "Payload Too Large\n";
+        case 501:
+            return "Not Implemented\n";
+        case 505:
+            return "HTTP Version Not Supported\n";
+        case 500:
+            return "Internal Server Error\n";
+        default:
+            return "Error\n";
+    }
+}
+
+/*
+ * Temporary Stage 2 handler: no router yet. GET/HEAD share one body string;
+ * POST gets a different confirmation body. HEAD omits the body on the wire
+ * but keeps Content-Length equal to the GET body size.
+ */
+static int build_success_response(const http_request_t *request, http_response_t *response) {
+    const char *body = STAGE2_GET_BODY;
+    if (request->method == HTTP_METHOD_POST) {
+        body = STAGE2_POST_BODY;
+    }
+    return http_response_build_text(response, 200, body);
+}
+
+static void send_error_response(int client_fd, int status, int omit_body) {
+    http_response_t response;
+    http_response_init(&response);
+    if (http_response_build_text(&response, status, error_body_for_status(status)) != 0) {
+        http_response_destroy(&response);
+        return;
+    }
+    if (http_response_send(client_fd, &response, omit_body) != 0) {
+        perror("cinderhttp: send response");
+    }
+    http_response_destroy(&response);
+}
+
+static void log_request_if_verbose(const server_config_t *config, const http_request_t *request,
+                                   int status) {
+    if (!config->verbose || request == NULL) {
+        return;
+    }
+    fprintf(stderr, "[verbose] %s %s -> %d\n", http_method_to_string(request->method),
+            request->target != NULL ? request->target : "?", status);
+}
+
+/*
+ * Per-connection Stage 2 lifecycle:
+ *   read one framed message -> parse -> build response -> send -> cleanup.
+ * Connection: close after exactly one request (keep-alive deferred).
+ */
+static void handle_client(const server_config_t *config, int client_fd) {
+    unsigned char *raw = NULL;
+    size_t raw_len = 0;
+    http_request_t request;
+    http_response_t response;
+    http_request_init(&request);
+    http_response_init(&response);
+
+    http_read_result_t read_result = http_read_request(client_fd, &raw, &raw_len);
+    if (read_result == HTTP_READ_CLIENT_CLOSED) {
+        /* No complete request (including zero-byte connects). Close quietly. */
+        goto cleanup;
+    }
+    if (read_result == HTTP_READ_IO_ERROR) {
+        perror("cinderhttp: recv");
+        goto cleanup;
+    }
+    if (read_result != HTTP_READ_OK) {
+        send_error_response(client_fd, status_for_read_result(read_result), 0);
+        goto cleanup;
+    }
+
+    http_parse_result_t parse_result = http_parse_request(raw, raw_len, &request);
+    if (parse_result != HTTP_PARSE_OK) {
+        int status = status_for_parse_result(parse_result);
+        if (config->verbose) {
+            fprintf(stderr, "[verbose] parse error -> %d\n", status);
+        }
+        send_error_response(client_fd, status, 0);
+        goto cleanup;
+    }
+
+    if (build_success_response(&request, &response) != 0) {
+        send_error_response(client_fd, 500, 0);
+        goto cleanup;
+    }
+
+    int omit_body = (request.method == HTTP_METHOD_HEAD) ? 1 : 0;
+    log_request_if_verbose(config, &request, response.status_code);
+    if (http_response_send(client_fd, &response, omit_body) != 0) {
+        perror("cinderhttp: send response");
+    }
+
+cleanup:
+    http_response_destroy(&response);
+    http_request_destroy(&request);
+    free(raw);
+    close(client_fd);
 }
 
 int server_run(const server_config_t *config, int listen_fd) {
@@ -177,7 +296,7 @@ int server_run(const server_config_t *config, int listen_fd) {
         }
 
         log_connection_if_verbose(config, &client_addr);
-        handle_client_stage1(client_fd);
+        handle_client(config, client_fd);
     }
 
     return 0;

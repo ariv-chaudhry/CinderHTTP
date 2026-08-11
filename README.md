@@ -6,7 +6,7 @@ producer-consumer connection queue, a fixed worker pool, static file
 serving, application routing, server statistics, and graceful shutdown
 without relying on an HTTP framework or parsing library.
 
-**Status: Stage 1 of a staged build-out.** The project is being developed in
+**Status: Stage 2 of a staged build-out.** The project is being developed in
 deliberate, verifiable stages rather than committed as one large drop; see
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what is implemented today
 versus what is planned. This README describes the project's target shape
@@ -22,22 +22,28 @@ Implemented so far:
 - An `accept()` loop that tolerates interrupted system calls and per-client
   errors without crashing
 - Signal-driven shutdown on `SIGINT`/`SIGTERM`
-- A reliable, partial-write-safe socket send helper (`send_all`)
+- Reliable, partial-write-safe `send_all()`
+- Buffered request reading across multiple `recv()` calls (TCP byte-stream framing)
+- Manual HTTP/1.0 and HTTP/1.1 request parsing (no HTTP libraries)
+- `GET`, `HEAD`, and `POST` with `Content-Length` bodies
+- Structured request/response models with explicit memory ownership
+- Correct `HEAD` responses (headers/`Content-Length` without a body)
+- Error responses: 400 / 405 / 413 / 501 / 505
+- Unit tests (`make test`) and curl/nc integration checks
 
 Planned (see [`docs/roadmap.md`](docs/roadmap.md) for the full breakdown):
 
-- Manual HTTP/1.1 request parsing (request line, headers, `Content-Length` body)
 - Static file serving with MIME detection and path-traversal protection
 - A bounded, thread-safe connection queue feeding a fixed worker pool
 - A lightweight router with `/api/health`, `/api/echo`, `/api/stats`
 - Thread-safe request logging and runtime statistics
 - Full graceful shutdown (drain queue, join workers, free all resources)
-- Unit tests, integration tests, sanitizer/Valgrind verification, and benchmarks
+- Keep-alive, chunked encoding, TLS, benchmarks
 
 ## Architecture
 
 Target architecture (worker pool and connection queue are not wired in yet -
-see [How It Works](#how-it-works) for what Stage 1 actually does today):
+see [How It Works](#how-it-works) for what Stage 2 actually does today):
 
 ```text
                        CLIENTS
@@ -83,22 +89,25 @@ see [How It Works](#how-it-works) for what Stage 1 actually does today):
 
 ## How It Works (current state)
 
-Right now the listening thread does everything itself, synchronously, per
-connection:
+The listening loop still handles each client inline (no worker pool yet):
 
 1. `main()` parses configuration and installs signal handlers.
 2. `server_create_listening_socket()` creates, binds, and listens on the
    configured TCP port.
-3. `server_run()` loops on `accept()`. For each accepted connection it sends
-   one fixed, correctly framed HTTP response (see `src/server.c`) and closes
-   the socket - there is no request parsing yet, so the response does not
-   depend on what the client sent.
+3. `server_run()` loops on `accept()`. For each connection:
+   - `http_read_request()` accumulates TCP bytes until `\r\n\r\n` and any
+     `Content-Length` body are complete
+   - `http_parse_request()` builds an owned `http_request_t`
+   - a temporary Stage 2 handler builds an `http_response_t` (fixed success
+     text for GET/HEAD/POST; mapped error statuses otherwise)
+   - the response is serialized with CRLF and sent via `send_all()`
+   - request/response/raw buffers are destroyed and the socket is closed
+     (`Connection: close`; one request per connection)
 4. On `SIGINT`/`SIGTERM`, `accept()` returns `EINTR`, the loop notices the
    shutdown flag and exits, and `main()` closes the listening socket.
 
-This exists to validate the socket lifecycle end-to-end before anything else
-is layered on top of it. The connection queue and worker pool described in
-the architecture diagram above are the next major pieces of work.
+See [`docs/http_support.md`](docs/http_support.md) and
+[`docs/memory_model.md`](docs/memory_model.md) for protocol scope and ownership.
 
 ## Concurrency Model
 
@@ -110,10 +119,10 @@ documented in `docs/concurrency.md`.
 
 ## HTTP Support
 
-Not yet implemented - no bytes are read from the client and no HTTP parsing
-occurs. Every connection receives the same hardcoded response regardless of
-method or path. Real parsing begins in Phase 2 of the roadmap; scope will be
-documented in `docs/http_support.md` once it exists.
+Stage 2 supports manual parsing of HTTP/1.0 and HTTP/1.1 requests for
+`GET` / `HEAD` / `POST`, `Content-Length` bodies, and structured response
+generation. Keep-alive, chunked encoding, routing, and static files are
+**not** implemented. Full detail: [`docs/http_support.md`](docs/http_support.md).
 
 ## Project Structure
 
@@ -125,44 +134,53 @@ CinderHTTP/
 |-- .gitignore
 |-- .clang-format
 |
-|-- include/            # Public headers, one per module
+|-- include/
 |   |-- config.h
 |   |-- server.h
-|   `-- utils.h
+|   |-- utils.h
+|   |-- http_limits.h
+|   |-- http_request.h
+|   |-- http_parser.h
+|   |-- http_reader.h
+|   `-- http_response.h
 |
-|-- src/                # Implementation, one .c per header above
+|-- src/
 |   |-- main.c
 |   |-- config.c
 |   |-- server.c
-|   `-- utils.c
+|   |-- utils.c
+|   |-- http_request.c
+|   |-- http_parser.c
+|   |-- http_reader.c
+|   `-- http_response.c
 |
 |-- public/             # Static site served once static_files.c exists
 |   |-- css/
 |   `-- assets/
 |
-|-- tests/               # Unit + integration tests (from Stage 2 onward)
+|-- tests/
+|   |-- test_parser.c
+|   |-- test_response.c
 |   `-- integration/
+|       `-- test_server.sh
 |
-|-- benchmarks/          # Load-testing scripts and (real, measured) results
+|-- benchmarks/
 |   `-- results/
 |
 |-- docs/
-|   `-- roadmap.md
+|   |-- roadmap.md
+|   |-- http_support.md
+|   `-- memory_model.md
 |
 `-- scripts/
     |-- run.sh
     `-- format.sh
 ```
 
-Headers/sources for modules that do not exist yet (`http_parser`,
-`http_request`, `http_response`, `router`, `static_files`, `mime`,
-`connection_queue`, `thread_pool`, `logger`, `stats`) are intentionally not
-present as empty stubs. An empty `.c` file is rejected by `-Wpedantic
--Werror` (`ISO C forbids an empty translation unit`) and an empty header
-would carry no information, so each file is added in the stage that actually
-implements it rather than committed as a placeholder. The same applies to
-`docs/architecture.md`, `docs/concurrency.md`, `docs/memory_model.md`, and
-`docs/http_support.md`, and to `benchmarks/benchmark.sh`/`benchmarks/README.md`.
+Modules that do not exist yet (`router`, `static_files`, `mime`,
+`connection_queue`, `thread_pool`, `logger`, `stats`) are added when the stage
+that implements them lands — not as empty stubs (`-Wpedantic -Werror` rejects
+empty translation units).
 
 ## Building
 
@@ -213,31 +231,27 @@ Not yet implemented. Planned: `GET /api/health`, `POST /api/echo`,
 
 ## Testing
 
-No automated tests yet - there is not yet enough behavior (parsing, routing,
-file serving) to meaningfully test beyond "does the process start." Unit
-tests begin in Phase 2 (`tests/test_parser.c`) once the HTTP parser exists.
-`make test` already exists and currently reports that no tests are present
-yet; it will pick up `tests/test_*.c` files automatically as they are added,
-with no further Makefile changes required.
+```bash
+make test                         # unit tests (parser + response)
+make integration                  # curl/nc checks against a live server
+```
 
-You can currently smoke-test the server manually:
+Manual smoke checks:
 
 ```bash
-make run &
+./bin/cinderhttp --port 8080 --verbose
 curl -i http://localhost:8080/
-curl -i http://localhost:8080/anything    # same fixed response; no routing yet
-kill %1                                    # or Ctrl+C in the foreground terminal
+curl -I http://localhost:8080/                 # HEAD: headers only
+curl -i -X POST --data hello http://localhost:8080/test
+curl -i -X DELETE http://localhost:8080/       # expect 405
 ```
 
 ## Memory Safety
 
 `make debug` builds with AddressSanitizer and UndefinedBehaviorSanitizer.
-There is minimal dynamic memory allocation yet (Stage 1 uses stack buffers
-and one file descriptor per connection), so there is little to catch today,
-but the sanitizer build is wired up now so every subsequent stage is checked
-from the moment it lands. Once heap allocation is introduced (starting with
-the HTTP request/response structures), this section will document concrete
-Valgrind usage, e.g.:
+Stage 2 unit tests were also run under those sanitizers. Ownership rules are
+documented in [`docs/memory_model.md`](docs/memory_model.md). Valgrind usage
+(once heap-heavy paths grow further):
 
 ```bash
 valgrind --leak-check=full --show-leak-kinds=all ./bin/cinderhttp
@@ -252,55 +266,45 @@ fabricated numbers.
 
 ## Limitations
 
-Current, real limitations of Stage 1 (not an exhaustive list of the
-project's eventual scope - see `docs/http_support.md` once it exists for
-that):
+Current, real limitations of Stage 2:
 
-- No HTTP parsing: the response is identical for every request.
-- Single-threaded: one client is handled at a time, synchronously, inline in
-  the accept loop.
-- No static file serving, routing, logging, or statistics.
-- `--workers`, `--queue-size`, and `--root` are accepted but not yet
-  functional.
+- Single-threaded: one client is handled at a time, inline in the accept loop
+- No static file serving, routing, structured request logging, or statistics
+- No keep-alive / pipelining / chunked transfer encoding / TLS
+- Temporary handler returns fixed success text for any valid GET/HEAD/POST
+  (path is parsed but not routed)
+- `--workers`, `--queue-size`, and `--root` are accepted but not yet functional
 
 ## Future Work
 
-Tracked in detail in [`docs/roadmap.md`](docs/roadmap.md). At a high level:
-HTTP parsing and responses, static file serving with MIME detection and
-path-traversal protection, a bounded connection queue and worker pool,
-routing and API endpoints, statistics, structured logging, full graceful
-shutdown, tests, sanitizer/Valgrind verification, and benchmarking.
+Tracked in detail in [`docs/roadmap.md`](docs/roadmap.md). Next up is static
+file serving with MIME detection and path-traversal protection, then the
+bounded connection queue and worker pool, routing/API endpoints, statistics,
+structured logging, full graceful shutdown, and benchmarking.
 
 ## What I Learned / Engineering Decisions
 
-- **Manual `argv` parsing over `getopt_long`.** The option set is small and
-  fixed, and hand-rolling it keeps error messages exactly as specified and
-  keeps the parsing logic in one obviously readable place rather than
-  behind `getopt`'s global `optarg`/`optind` state.
-- **`strtol` over `atoi` for numeric CLI options.** `atoi` has no way to
-  report failure; `strtol` combined with checking `errno` and the end
-  pointer lets `--port abc` be rejected outright instead of silently
-  becoming `0`.
-- **`sig_atomic_t` flag + no `SA_RESTART`, instead of a self-pipe or
-  `signalfd`.** For a single blocking `accept()` call, a flag that the
-  signal handler sets and the accept loop polls is the simplest correct
-  option: the handler does no I/O or allocation (required for
-  async-signal-safety), and omitting `SA_RESTART` guarantees `accept()`
-  actually returns `EINTR` instead of transparently retrying and never
-  observing the flag.
-- **`SO_REUSEADDR` on the listening socket.** Without it, restarting the
-  server immediately after stopping it (common during development) often
-  fails with "Address already in use" while the previous socket's
-  connections are still in `TIME_WAIT`.
-- **Computing `Content-Length` from `strlen()` instead of writing the number
-  by hand.** A hand-counted length is an easy way to send a subtly broken
-  response; deriving it from the actual body at runtime makes the two
-  impossible to desynchronize.
-- **No stub files for unimplemented modules.** See
-  [Project Structure](#project-structure) - files are added when the stage
-  that implements them lands, not as empty placeholders, partly because
-  `-Wpedantic -Werror` rejects empty translation units and partly because an
-  empty file documents nothing.
+- **Separate framing from parsing.** `http_reader` reconstructs one complete
+  message across multiple `recv()` calls; `http_parser` only sees complete
+  buffers. That split matches how TCP actually works and makes the parser
+  unit-testable without sockets.
+- **Shared Content-Length validation.** The reader and parser both call
+  `http_inspect_message_framing()` / `http_parse_content_length_value()` so
+  framing rules cannot disagree.
+- **Reject duplicate `Content-Length` always.** Even identical duplicates are
+  refused; ambiguous framing is not worth supporting.
+- **`Transfer-Encoding` → 501, not silent ignore.** Chunked bodies are a
+  future feature; pretending they are absent would be incorrect.
+- **HEAD omits body but keeps `Content-Length`.** Serialization takes an
+  `omit_body` flag so GET and HEAD share one response object.
+- **Manual `argv` parsing over `getopt_long`.** Small fixed option set; clear
+  errors without `optarg`/`optind` globals.
+- **`sig_atomic_t` flag + no `SA_RESTART`.** Async-signal-safe shutdown that
+  unblocks `accept()` via `EINTR`.
+- **`SO_REUSEADDR`.** Avoids restart failures while prior sockets sit in
+  `TIME_WAIT`.
+- **No stub files for unimplemented modules.** Added only when implemented
+  (`-Wpedantic -Werror` rejects empty translation units).
 
 ## License
 

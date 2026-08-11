@@ -1,13 +1,12 @@
 /*
  * server.h - listening socket lifecycle and the accept loop.
  *
- * Stage 1 scope: the accept loop below handles each client directly and
- * sends a fixed response. Starting with the connection queue and worker
- * pool (see docs/roadmap.md), server_run() will instead push accepted file
- * descriptors into a bounded queue and return immediately, letting worker
- * threads do the actual request handling. That change is confined to
- * server.c; this header's contract ("run until shutdown, return 0 on a
- * clean exit") does not need to change.
+ * Stage 2: the accept loop still handles each client inline (no worker pool
+ * yet). Per connection it reads one framed HTTP request, parses it, builds a
+ * response, and closes the socket (Connection: close). Starting with the
+ * connection queue and worker pool (see docs/roadmap.md), server_run() will
+ * instead push accepted file descriptors into a bounded queue; that change
+ * is confined to server.c.
  */
 #ifndef CINDERHTTP_SERVER_H
 #define CINDERHTTP_SERVER_H

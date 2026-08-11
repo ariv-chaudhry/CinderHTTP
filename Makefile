@@ -69,7 +69,7 @@ CFLAGS_MARKER := $(BUILD_DIR)/.cflags
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug test clean run format help FORCE
+.PHONY: all debug test integration clean run format help FORCE
 
 all: $(TARGET)
 
@@ -102,17 +102,21 @@ debug: $(TARGET)
 -include $(DEPS)
 
 $(BUILD_DIR)/tests/%: $(TEST_DIR)/%.c $(CORE_OBJS) | $(BUILD_DIR)/tests
-	$(CC) $(RELEASE_CFLAGS) $< $(CORE_OBJS) -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) $< $(CORE_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
 
 test: $(TEST_BINS)
 	@if [ -z "$(strip $(TEST_BINS))" ]; then \
-		echo "No unit tests found yet (tests/test_*.c begins in Stage 2 with the HTTP parser)."; \
+		echo "No unit tests found (expected tests/test_*.c)."; \
+		exit 1; \
 	else \
 		for t in $(TEST_BINS); do \
 			echo "== Running $$t =="; \
 			$$t || exit 1; \
 		done; \
 	fi
+
+integration: all
+	@bash tests/integration/test_server.sh
 
 run: all
 	./$(TARGET)
@@ -125,9 +129,10 @@ clean:
 
 help:
 	@echo "Targets:"
-	@echo "  make          - optimized build -> $(TARGET)"
-	@echo "  make debug    - ASan/UBSan debug build -> $(TARGET)"
-	@echo "  make test     - build and run unit tests"
-	@echo "  make run      - build and run the server with default config"
-	@echo "  make format   - format sources with clang-format, if installed"
-	@echo "  make clean    - remove build/ and bin/"
+	@echo "  make             - optimized build -> $(TARGET)"
+	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
+	@echo "  make test        - build and run unit tests"
+	@echo "  make integration - run curl-based Stage 2 integration checks"
+	@echo "  make run         - build and run the server with default config"
+	@echo "  make format      - format sources with clang-format, if installed"
+	@echo "  make clean       - remove build/ and bin/"

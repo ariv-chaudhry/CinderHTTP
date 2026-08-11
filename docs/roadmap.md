@@ -1,13 +1,12 @@
 # Roadmap
 
-CinderHTTP is being built in controlled stages rather than all at once (see
-the development log in the project history for the exact stage boundaries).
-This roadmap tracks progress by feature area. Checkboxes are only marked
-complete once the corresponding behavior has actually been implemented *and*
-exercised (compiled, run, and/or tested) - not when it is merely planned.
+CinderHTTP is being built in controlled stages rather than all at once.
+Checkboxes are only marked complete once the corresponding behavior has
+actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 1 complete** - TCP core (configuration, listening
-socket, accept loop, hardcoded response, basic signal-driven shutdown).
+Current status: **Stage 2 complete** - HTTP core (buffered request reading,
+manual parser, request/response models, GET/HEAD/POST handling, unit +
+integration tests).
 
 ## Phase 1 - TCP Core
 
@@ -22,11 +21,14 @@ socket, accept loop, hardcoded response, basic signal-driven shutdown).
 
 ## Phase 2 - HTTP Core
 
-- [ ] Request model (`http_request_t`, `http_header_t`)
-- [ ] Parser (request line, headers, `Content-Length` body)
-- [ ] Response generation (`http_response_t`, status/reason mapping)
-- [ ] GET
-- [ ] HEAD
+- [x] Request model (`http_request_t`, `http_header_t`)
+- [x] Parser (request line, headers, `Content-Length` body)
+- [x] Response generation (`http_response_t`, status/reason mapping)
+- [x] GET
+- [x] HEAD
+- [x] POST body parsing via `Content-Length`
+- [x] Buffered multi-`recv()` request framing (`http_reader`)
+- [x] Error responses: 400 / 405 / 413 / 501 / 505
 
 ## Phase 3 - Static Serving
 
@@ -52,18 +54,21 @@ socket, accept loop, hardcoded response, basic signal-driven shutdown).
 
 - [ ] Graceful shutdown, full version (drain/stop worker pool, join threads,
       destroy synchronization primitives, free all allocations)
-- [ ] Malformed-request handling (400/405/413/505 paths)
+- [ ] Malformed-request handling (400/405/413/505 paths) — *basic mapping
+      exists in Stage 2; full audit remains*
 - [ ] Memory cleanup audit
-- [ ] AddressSanitizer / UndefinedBehaviorSanitizer clean run
+- [ ] AddressSanitizer / UndefinedBehaviorSanitizer clean run — *Stage 2 unit
+      tests were run under ASan/UBSan; broader process audit remains*
 - [ ] Valgrind clean run
 
 ## Phase 7 - Testing
 
-- [ ] Parser tests
+- [x] Parser tests
 - [ ] Queue tests
 - [ ] Router tests
 - [ ] Security tests (path traversal, oversized input)
-- [ ] Integration tests (curl-driven, plus raw malformed requests via `nc`)
+- [x] Integration tests (curl-driven, plus raw malformed requests via `nc`)
+      — Stage 2 subset
 
 ## Phase 8 - Performance
 
@@ -73,17 +78,10 @@ socket, accept loop, hardcoded response, basic signal-driven shutdown).
 
 ---
 
-### Notes on Stage 1
+### Notes on Stage 2
 
-- `--workers`, `--queue-size`, and `--root` are parsed and validated now, but
-  do not yet influence server behavior - there is no thread pool, connection
-  queue, or static file server yet for them to configure. They are accepted
-  early so the CLI surface does not change shape later.
-- The server currently sends one fixed, hardcoded response to every
-  connection regardless of method or path, purely to prove the socket
-  lifecycle (`socket` -> `bind` -> `listen` -> `accept` -> respond -> close)
-  works correctly. Real HTTP parsing begins in Phase 2.
-- Shutdown today only has to stop an accept loop and close one socket, so
-  the "basic" bullet above is complete. It is listed separately from Phase
-  6's full graceful shutdown because that version also has to drain the
-  connection queue and join worker threads, neither of which exist yet.
+- The temporary request handler returns fixed success text for any valid
+  GET/HEAD/POST. There is still no router and no static file serving.
+- `Connection: close` is always sent; keep-alive is deferred.
+- Duplicate `Content-Length` headers are rejected even when identical.
+- `Transfer-Encoding` (including `chunked`) returns `501 Not Implemented`.
