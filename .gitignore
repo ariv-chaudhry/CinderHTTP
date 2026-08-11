@@ -1,0 +1,22 @@
+# Build outputs
+build/
+bin/
+*.o
+*.d
+*.out
+*.log
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Valgrind / sanitizer artifacts
+core
+vgcore.*
+
+# Local benchmark output (see benchmarks/results/README.md)
+benchmarks/results/*
+!benchmarks/results/.gitkeep
