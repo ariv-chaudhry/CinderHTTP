@@ -1,68 +1,83 @@
 # Memory Model
 
-Ownership rules for Stage 2. Every allocation has a clear owner and a matching
-release path.
+Ownership rules through Stage 3. Every allocation has a clear owner and a
+matching release path.
 
 ## Raw receive buffer
 
 - Allocated by `http_read_request()` via `malloc`/`realloc`.
 - On success, ownership is transferred to the caller through `*buffer`.
-- The per-connection handler in `server.c` frees this buffer after parsing
-  (including on error paths).
+- `handle_client()` in `server.c` frees this buffer after parsing (including
+  error paths).
 
 ## `http_request_t`
 
-Owns:
+Owns: `target`, `version`, header array, each header name/value, and `body`.
 
-- `target`
-- `version`
-- header array (`headers`)
-- each header `name` and `value`
-- `body` (optional; may contain embedded NUL bytes)
+`http_request_destroy()` releases all of the above.
 
-`http_request_destroy()` releases all of the above and re-initializes the
-struct to an empty state.
-
-Pointers returned by `http_request_get_header()` are owned by the request and
-become invalid after `http_request_destroy()`.
-
-On parse failure, `http_parse_request()` destroys any partial allocations
-before returning, so the caller's `http_request_t` is always destroy-safe.
+Pointers from `http_request_get_header()` are owned by the request and become
+invalid after destroy.
 
 ## `http_response_t`
 
-Owns:
+Owns: header array / name / value strings, and `body` when `body_owned` is set.
 
-- header array and each header name/value
-- `body` when `body_owned` is set (the usual case for text responses)
+Does **not** own: `reason_phrase` (static string from `http_reason_phrase()`).
 
-Does **not** own:
-
-- `reason_phrase` (points at a static string from `http_reason_phrase()`)
-
-`http_response_destroy()` frees owned headers/body and resets the struct.
+`http_response_destroy()` frees owned storage.
 
 ## Serialized response bytes
 
-- `http_response_serialize()` allocates a wire buffer (with a trailing NUL for
-  convenience; reported length excludes the NUL).
+- `http_response_serialize()` allocates a wire buffer (trailing NUL for
+  convenience; reported length excludes it).
 - `http_response_send()` frees that buffer after `send_all()`.
-- Callers of `serialize` directly must `free()` the buffer themselves.
+
+## Static-file path lifetime
+
+All of the following are local to `static_files_serve()` (or helpers) and are
+freed before the function returns — including on error:
+
+| Buffer | Created by | Freed by |
+|--------|------------|----------|
+| Path-only target (query stripped) | `static_files_extract_path` | `static_files_serve` cleanup |
+| URL-decoded path | `static_files_url_decode` | `static_files_serve` cleanup |
+| Lexically normalized relative path | `static_files_normalize_path` | `static_files_serve` cleanup |
+| Canonical resolved filesystem path | `resolve_under_root` | `static_files_serve` cleanup |
+
+Stack buffers (`PATH_MAX` arrays) hold temporary `realpath` / join results and
+need no free.
+
+## Static file body ownership
+
+- On successful GET, `read_entire_file()` allocates the body buffer.
+- Ownership is transferred into `http_response_t` via
+  `http_response_set_body_owned()` (`body_owned = 1`).
+- `http_response_destroy()` releases the body afterward.
+- On HEAD (`load_body = 0`), no file body is allocated; `body_length` is set
+  from `stat` metadata only.
+
+## Custom 404 page
+
+`static_files_build_not_found()` may call `static_files_serve()` for
+`/404.html`. On success, that response (including owned body) is moved into
+the caller's `http_response_t` and retagged as status 404. On failure, a
+generated HTML error body is allocated instead.
 
 ## Client sockets
 
-- Accepted in `server_run()`, owned by `handle_client()` for the duration of
-  the request.
-- Always closed at the end of `handle_client()`, including error/early-exit
-  paths.
-- The listening socket remains owned by `main()` and is closed after
-  `server_run()` returns.
+- Accepted in `server_run()`, owned by `handle_client()` for the request.
+- Always closed at the end of `handle_client()`.
+- Listening socket remains owned by `main()`.
 
 ## Configuration
 
 - `server_config_t` is a stack object in `main()` with no dynamic allocations.
+  `document_root` is a fixed-size array inside the struct.
 
-## Not yet present
+## Known limitation (TOCTOU)
 
-Queue storage, worker thread arrays, static-file buffers, and logger/stats
-state will document their ownership when those modules are introduced.
+Path validation uses `realpath`/`stat` then later `fopen`. A race between
+those calls is possible on a shared filesystem. This educational server does
+not claim production-grade sandboxing; descriptor-based hardening can be
+explored later without changing the Stage 3 API shape.

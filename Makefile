@@ -19,11 +19,11 @@ STD := -std=c11
 # accumulating as the project grows.
 WARN_FLAGS := -Wall -Wextra -Wpedantic -Werror
 
-# glibc hides POSIX declarations (sigaction, inet_ntop, strtol's errno
-# behavior, etc.) under strict -std=c11 unless a feature test macro says
-# otherwise. 200809L requests POSIX.1-2008, which covers everything this
-# project uses.
-FEATURE_FLAGS := -D_POSIX_C_SOURCE=200809L
+# glibc hides POSIX / XSI declarations (sigaction, inet_ntop, realpath, etc.)
+# under strict -std=c11 unless feature-test macros say otherwise. 200809L is
+# POSIX.1-2008; _XOPEN_SOURCE=700 additionally exposes realpath() and related
+# XSI APIs used by the static-file path confinement code.
+FEATURE_FLAGS := -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 
 INCLUDES := -Iinclude
 

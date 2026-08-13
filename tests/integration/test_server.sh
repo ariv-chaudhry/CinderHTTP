@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 #
-# Stage 2 integration checks against a live CinderHTTP process.
-# Starts the server on a dedicated port, runs curl (and nc when available),
-# then shuts the server down.
+# Integration checks for Stages 2–3 against a live CinderHTTP process.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,10 +19,9 @@ trap cleanup EXIT
 
 make -C "$repo_root" --silent all
 
-"$bin" --port "$port" >/tmp/cinderhttp-integration.log 2>&1 &
+"$bin" --port "$port" --root "$repo_root/public" >/tmp/cinderhttp-integration.log 2>&1 &
 pid=$!
 
-# Wait for the listening socket rather than a fixed sleep.
 ready=0
 for _ in $(seq 1 50); do
     if ss -ltn 2>/dev/null | grep -q ":${port}"; then
@@ -52,23 +49,30 @@ check() {
     fi
 }
 
-check "GET status 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
-
+check "GET / status 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
 body="$(curl -sS "http://127.0.0.1:${port}/")"
-check "GET body" bash -c "printf '%s' \"$body\" | grep -q 'CinderHTTP request parsed successfully'"
+check "GET / is HTML" bash -c "printf '%s' \"$body\" | grep -q 'CinderHTTP'"
+ctype="$(curl -sS -D - -o /dev/null "http://127.0.0.1:${port}/" | tr -d '\r' | grep -i '^Content-Type:' || true)"
+check "GET / Content-Type html" bash -c "printf '%s' \"$ctype\" | grep -qi 'text/html'"
+
+check "GET CSS 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/css/style.css\" | grep -qx 200"
+css_ctype="$(curl -sS -D - -o /dev/null "http://127.0.0.1:${port}/css/style.css" | tr -d '\r' | grep -i '^Content-Type:' || true)"
+check "GET CSS Content-Type" bash -c "printf '%s' \"$css_ctype\" | grep -qi 'text/css'"
 
 head_out="$(curl -sS -I "http://127.0.0.1:${port}/")"
-check "HEAD status line" bash -c "printf '%s' \"$head_out\" | head -n1 | grep -q '200'"
-check "HEAD Content-Length" bash -c "printf '%s' \"$head_out\" | grep -qi 'Content-Length:'"
-# size_download is the response body size; HEAD must transfer 0 body bytes.
+check "HEAD status 200" bash -c "printf '%s' \"$head_out\" | head -n1 | grep -q '200'"
 dl="$(curl -sS -o /dev/null -w '%{size_download}' --head "http://127.0.0.1:${port}/")"
 check "HEAD no body bytes" bash -c "test \"$dl\" = 0"
 
-check "POST status 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X POST --data hello \"http://127.0.0.1:${port}/test\" | grep -qx 200"
-post_body="$(curl -sS -X POST --data hello "http://127.0.0.1:${port}/test")"
-check "POST body" bash -c "printf '%s' \"$post_body\" | grep -q 'POST request parsed successfully'"
+check "404 missing" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/does-not-exist\" | grep -qx 404"
+not_found_body="$(curl -sS "http://127.0.0.1:${port}/does-not-exist")"
+check "custom 404 body" bash -c "printf '%s' \"$not_found_body\" | grep -q '404 Not Found'"
 
-check "DELETE status 405" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X DELETE \"http://127.0.0.1:${port}/\" | grep -qx 405"
+check "traversal blocked" bash -c "curl -sS --path-as-is -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/../../outside.txt\" | grep -qx 403"
+check "encoded traversal blocked" bash -c "curl -sS --path-as-is -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/%2e%2e/etc/passwd\" | grep -qx 403"
+
+check "POST still works" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X POST --data hello \"http://127.0.0.1:${port}/test\" | grep -qx 200"
+check "DELETE still 405" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X DELETE \"http://127.0.0.1:${port}/\" | grep -qx 405"
 
 if command -v nc >/dev/null 2>&1; then
     malformed_out="$(printf 'GET / NotHTTP\r\n\r\n' | nc -w 2 127.0.0.1 "$port" || true)"
@@ -83,4 +87,4 @@ if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi
 
-echo "All Stage 2 integration checks passed."
+echo "All Stage 3 integration checks passed."

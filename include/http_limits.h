@@ -25,4 +25,11 @@
 /* Absolute ceiling for a single reconstructed message: headers + body. */
 #define HTTP_MAX_MESSAGE_BYTES (HTTP_MAX_HEADER_BYTES + HTTP_MAX_BODY_SIZE)
 
+/*
+ * Stage 3 buffers static files in memory before sending. This cap prevents a
+ * single huge file from exhausting RAM. Streaming / sendfile() is future work.
+ * Oversized static files yield 413 Payload Too Large.
+ */
+#define HTTP_MAX_STATIC_FILE_SIZE (16 * 1024 * 1024)
+
 #endif /* CINDERHTTP_HTTP_LIMITS_H */

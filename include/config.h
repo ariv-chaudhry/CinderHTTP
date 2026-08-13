@@ -44,9 +44,9 @@
 
 /*
  * Immutable-after-startup server configuration. `worker_count` and
- * `queue_capacity` are accepted and validated starting now, but only take
- * effect once the thread pool and connection queue are introduced later;
- * see docs/roadmap.md.
+ * `queue_capacity` are accepted and validated now but only take effect once
+ * the thread pool and connection queue are introduced later.
+ * `document_root` is used by Stage 3 static file serving.
  */
 typedef struct {
     int port;

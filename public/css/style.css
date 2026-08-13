@@ -1,0 +1,27 @@
+body {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  background: #f3efe6;
+  color: #1c1a16;
+}
+
+main {
+  max-width: 40rem;
+  margin: 4rem auto;
+  padding: 0 1.5rem;
+}
+
+h1 {
+  font-size: 2.5rem;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.25rem;
+}
+
+.tagline {
+  color: #5c5346;
+  font-style: italic;
+}
+
+a {
+  color: #8b4513;
+}

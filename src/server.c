@@ -15,6 +15,7 @@
 #include "http_reader.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "static_files.h"
 
 /*
  * Kernel-level backlog of fully-established connections waiting for
@@ -25,7 +26,6 @@
  */
 #define SERVER_LISTEN_BACKLOG 128
 
-#define STAGE2_GET_BODY "CinderHTTP request parsed successfully.\n"
 #define STAGE2_POST_BODY "POST request parsed successfully.\n"
 
 /*
@@ -165,45 +165,68 @@ static int status_for_parse_result(http_parse_result_t result) {
     }
 }
 
-static const char *error_body_for_status(int status) {
+static int status_for_static_result(static_file_result_t result) {
+    switch (result) {
+        case STATIC_FILE_OK:
+            return 200;
+        case STATIC_FILE_NOT_FOUND:
+            return 404;
+        case STATIC_FILE_FORBIDDEN:
+            return 403;
+        case STATIC_FILE_BAD_TARGET:
+            return 400;
+        case STATIC_FILE_TOO_LARGE:
+            return 413;
+        case STATIC_FILE_OUT_OF_MEMORY:
+        case STATIC_FILE_IO_ERROR:
+        default:
+            return 500;
+    }
+}
+
+static const char *error_heading_for_status(int status) {
     switch (status) {
         case 400:
-            return "Bad Request\n";
+            return "Bad Request";
+        case 403:
+            return "Forbidden";
+        case 404:
+            return "Not Found";
         case 405:
-            return "Method Not Allowed\n";
+            return "Method Not Allowed";
         case 413:
-            return "Payload Too Large\n";
+            return "Payload Too Large";
         case 501:
-            return "Not Implemented\n";
+            return "Not Implemented";
         case 505:
-            return "HTTP Version Not Supported\n";
+            return "HTTP Version Not Supported";
         case 500:
-            return "Internal Server Error\n";
         default:
-            return "Error\n";
+            return "Internal Server Error";
     }
 }
 
-/*
- * Temporary Stage 2 handler: no router yet. GET/HEAD share one body string;
- * POST gets a different confirmation body. HEAD omits the body on the wire
- * but keeps Content-Length equal to the GET body size.
- */
-static int build_success_response(const http_request_t *request, http_response_t *response) {
-    const char *body = STAGE2_GET_BODY;
-    if (request->method == HTTP_METHOD_POST) {
-        body = STAGE2_POST_BODY;
-    }
-    return http_response_build_text(response, 200, body);
-}
-
-static void send_error_response(int client_fd, int status, int omit_body) {
+static void send_error_response(const server_config_t *config, int client_fd, int status,
+                                int omit_body) {
     http_response_t response;
     http_response_init(&response);
-    if (http_response_build_text(&response, status, error_body_for_status(status)) != 0) {
-        http_response_destroy(&response);
-        return;
+
+    int built = -1;
+    if (status == 404) {
+        built = static_files_build_not_found(config->document_root, &response);
+    } else {
+        built = static_files_build_error(&response, status, error_heading_for_status(status));
     }
+
+    if (built != 0) {
+        /* Last-resort plain text if HTML construction failed. */
+        http_response_destroy(&response);
+        if (http_response_build_text(&response, status, error_heading_for_status(status)) != 0) {
+            http_response_destroy(&response);
+            return;
+        }
+    }
+
     if (http_response_send(client_fd, &response, omit_body) != 0) {
         perror("cinderhttp: send response");
     }
@@ -220,8 +243,43 @@ static void log_request_if_verbose(const server_config_t *config, const http_req
 }
 
 /*
- * Per-connection Stage 2 lifecycle:
- *   read one framed message -> parse -> build response -> send -> cleanup.
+ * Temporary POST handling from Stage 2 (no router /api/echo yet). Static
+ * files are never written — POST never maps to the filesystem.
+ */
+static int build_post_response(http_response_t *response) {
+    return http_response_build_text(response, 200, STAGE2_POST_BODY);
+}
+
+static int handle_static_get_head(const server_config_t *config, const http_request_t *request,
+                                  http_response_t *response, int load_body) {
+    static_file_result_t result =
+        static_files_serve(config->document_root, request, response, load_body);
+
+    if (result == STATIC_FILE_OK) {
+        return 200;
+    }
+
+    int status = status_for_static_result(result);
+    if (config->verbose) {
+        fprintf(stderr, "[verbose] static resolve -> %d\n", status);
+    }
+
+    http_response_destroy(response);
+    if (status == 404) {
+        if (static_files_build_not_found(config->document_root, response) != 0) {
+            return 500;
+        }
+    } else {
+        if (static_files_build_error(response, status, error_heading_for_status(status)) != 0) {
+            return 500;
+        }
+    }
+    return status;
+}
+
+/*
+ * Per-connection lifecycle:
+ *   read one framed message -> parse -> dispatch -> send -> cleanup.
  * Connection: close after exactly one request (keep-alive deferred).
  */
 static void handle_client(const server_config_t *config, int client_fd) {
@@ -234,7 +292,6 @@ static void handle_client(const server_config_t *config, int client_fd) {
 
     http_read_result_t read_result = http_read_request(client_fd, &raw, &raw_len);
     if (read_result == HTTP_READ_CLIENT_CLOSED) {
-        /* No complete request (including zero-byte connects). Close quietly. */
         goto cleanup;
     }
     if (read_result == HTTP_READ_IO_ERROR) {
@@ -242,7 +299,7 @@ static void handle_client(const server_config_t *config, int client_fd) {
         goto cleanup;
     }
     if (read_result != HTTP_READ_OK) {
-        send_error_response(client_fd, status_for_read_result(read_result), 0);
+        send_error_response(config, client_fd, status_for_read_result(read_result), 0);
         goto cleanup;
     }
 
@@ -252,17 +309,32 @@ static void handle_client(const server_config_t *config, int client_fd) {
         if (config->verbose) {
             fprintf(stderr, "[verbose] parse error -> %d\n", status);
         }
-        send_error_response(client_fd, status, 0);
-        goto cleanup;
-    }
-
-    if (build_success_response(&request, &response) != 0) {
-        send_error_response(client_fd, 500, 0);
+        send_error_response(config, client_fd, status, 0);
         goto cleanup;
     }
 
     int omit_body = (request.method == HTTP_METHOD_HEAD) ? 1 : 0;
-    log_request_if_verbose(config, &request, response.status_code);
+    int status = 500;
+
+    if (request.method == HTTP_METHOD_GET || request.method == HTTP_METHOD_HEAD) {
+        int load_body = (request.method == HTTP_METHOD_GET) ? 1 : 0;
+        status = handle_static_get_head(config, &request, &response, load_body);
+        if (status == 500 && response.body == NULL) {
+            send_error_response(config, client_fd, 500, omit_body);
+            goto cleanup;
+        }
+    } else if (request.method == HTTP_METHOD_POST) {
+        if (build_post_response(&response) != 0) {
+            send_error_response(config, client_fd, 500, 0);
+            goto cleanup;
+        }
+        status = 200;
+    } else {
+        send_error_response(config, client_fd, 405, 0);
+        goto cleanup;
+    }
+
+    log_request_if_verbose(config, &request, status);
     if (http_response_send(client_fd, &response, omit_body) != 0) {
         perror("cinderhttp: send response");
     }
@@ -275,7 +347,8 @@ cleanup:
 }
 
 int server_run(const server_config_t *config, int listen_fd) {
-    printf("CinderHTTP listening on port %d (press Ctrl+C to stop)\n", config->port);
+    printf("CinderHTTP listening on port %d (root=%s, press Ctrl+C to stop)\n", config->port,
+           config->document_root);
 
     while (!shutdown_was_requested()) {
         struct sockaddr_in client_addr;
@@ -285,12 +358,8 @@ int server_run(const server_config_t *config, int listen_fd) {
         int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
             if (errno == EINTR) {
-                /* Either the shutdown signal or something benign; let the
-                 * while-condition above decide whether to keep looping. */
                 continue;
             }
-            /* A single misbehaving client/kernel hiccup must not take down
-             * the whole server. */
             perror("cinderhttp: accept");
             continue;
         }
