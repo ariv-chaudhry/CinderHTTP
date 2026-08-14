@@ -4,9 +4,9 @@ CinderHTTP is being built in controlled stages rather than all at once.
 Checkboxes are only marked complete once the corresponding behavior has
 actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 7 complete** - deliberate adversarial regression coverage
-for framing, malformed input, deterministic parser fuzzing, live raw-socket
-clients, concurrency stress, and sanitizer-backed suites.
+Current status: **Stage 8 complete** - reproducible localhost benchmarking of
+release builds across worker counts, with warm-up, repeated runs, and structured
+JSON/CSV output (no fabricated performance claims).
 
 ## Phase 1 - TCP Core
 
@@ -83,9 +83,15 @@ clients, concurrency stress, and sanitizer-backed suites.
 
 ## Phase 8 - Performance
 
-- [ ] Benchmark script (`wrk`/`ab`/`hey`, whichever is available)
-- [ ] Worker-count comparison (1/2/4/8 workers)
-- [ ] Latency measurements (avg, p95)
+- [x] Reproducible benchmark harness
+- [x] Automatic wrk / hey / ab detection
+- [x] Worker-count comparison (1 / 2 / 4 / 8)
+- [x] Repeated measurements with warm-up
+- [x] Throughput measurements
+- [x] Average latency measurements
+- [x] p95 latency where supported by the selected tool
+- [x] JSON benchmark output
+- [x] Human-readable aggregate report
 
 ---
 
@@ -97,3 +103,14 @@ clients, concurrency stress, and sanitizer-backed suites.
 - Embedded NUL bytes are rejected in protocol metadata; bodies may still be binary.
 - No client read-timeout subsystem yet (documented limitation).
 - See [`docs/testing.md`](testing.md) for commands and fuzz details.
+
+### Notes on Stage 8
+
+- Benchmarks use the **release** (`-O2`) binary on localhost, defaulting to
+  `GET /api/health`.
+- Each worker count starts a **fresh** server; warm-up is discarded; iterations
+  are aggregated (mean / stdev) into JSON and CSV under `benchmarks/results/`.
+- Results are machine- and environment-dependent; they are a baseline for later
+  optimization decisions, not production capacity claims.
+- CinderHTTP remains one-request-per-connection (no keep-alive).
+- See [`benchmarks/README.md`](../benchmarks/README.md).

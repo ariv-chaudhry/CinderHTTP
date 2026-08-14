@@ -69,7 +69,8 @@ CFLAGS_MARKER := $(BUILD_DIR)/.cflags
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug test integration sanitize valgrind fuzz coverage clean run format help FORCE
+.PHONY: all debug test integration sanitize valgrind fuzz coverage benchmark \
+	benchmark-test clean run format help FORCE
 
 all: $(TARGET)
 
@@ -132,6 +133,18 @@ test: $(TEST_BINS)
 			$$t || exit 1; \
 		done; \
 	fi
+	@$(MAKE) --no-print-directory benchmark-test
+
+# Parser/unit tests for the Stage 8 harness (no wrk/hey/ab required).
+benchmark-test:
+	@echo "== Running benchmarks/test_benchmark.py =="
+	@cd benchmarks && python3 -m unittest test_benchmark.py -v
+
+# Always rebuild/link the optimized release binary before load tests so a prior
+# `make debug` cannot leave ASan/UBSan objects in the benchmarked executable.
+benchmark:
+	$(MAKE) all CFLAGS="$(RELEASE_CFLAGS)" LDFLAGS=""
+	python3 benchmarks/benchmark.py $(BENCH_ARGS)
 
 sanitize: test
 	@echo "sanitize: ASan/UBSan unit tests completed"
@@ -187,7 +200,10 @@ help:
 	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
 	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
 	@echo "  make sanitize    - ASan/UBSan unit tests (convenience alias)"
-	@echo "  make test        - build and run unit tests"
+	@echo "  make test        - build and run unit tests (+ benchmark parser tests)"
+	@echo "  make benchmark-test - Python unittest for benchmark parsers only"
+	@echo "  make benchmark   - release build + Stage 8 load harness (needs wrk/hey/ab)"
+	@echo "                     override flags: make benchmark BENCH_ARGS='--duration 5'"
 	@echo "  make fuzz        - deterministic parser fuzz (default 50000 iters)"
 	@echo "  make coverage    - rebuild unit tests with gcov and print summary"
 	@echo "  make valgrind    - run unit tests under Valgrind (if installed)"

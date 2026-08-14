@@ -15,11 +15,13 @@ shutdown behavior — not internal implementation trivia.
 | Sanitizer | ASan + UBSan via `make debug test` / `make sanitize` |
 | Valgrind | Optional leak/origin checks via `make valgrind` |
 | Coverage | Optional gcov summary via `make coverage` |
+| Performance | Optional load harness via `make benchmark` (separate from correctness) |
 
 ## Commands
 
 ```bash
-make test                 # unit suite (includes ~2000 fuzz iterations)
+make test                 # unit suite (includes ~2000 fuzz iterations + bench parser tests)
+make benchmark-test       # Python unittest for wrk/hey/ab parsers only
 make integration          # live Stage 2–7 checks
 make sanitize             # ASan/UBSan unit tests
 make debug test           # same, explicit debug flags in one make run
@@ -27,7 +29,26 @@ make fuzz                 # deeper parser fuzz (default 50,000 iterations)
 CINDERHTTP_FUZZ_ITERS=100000 make fuzz
 make valgrind             # skipped cleanly if Valgrind is missing
 make coverage             # clean rebuild with --coverage + gcov summary
+make benchmark            # release build + load harness (requires wrk, hey, or ab)
+make benchmark BENCH_ARGS="--connections 128 --duration 15"
 ```
+
+## Performance testing
+
+Performance benchmarks are intentionally separate from correctness tests.
+
+```bash
+make benchmark
+```
+
+The harness starts fresh release-mode server instances across the selected
+worker counts, performs a warm-up, runs repeated measurements, and stores
+structured results under `benchmarks/results/`.
+
+`make test` remains deterministic and does **not** run load generators. Host
+performance numbers must not be asserted in unit tests.
+
+Details: [`benchmarks/README.md`](../benchmarks/README.md).
 
 ## Fuzzing
 

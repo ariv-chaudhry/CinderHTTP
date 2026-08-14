@@ -8,7 +8,7 @@ It implements manual HTTP parsing, an application router, secure static file
 serving, MIME detection, thread-safe verbose logging, runtime statistics, and
 graceful signal-driven shutdown — without an HTTP framework or parsing library.
 
-**Status: Stage 7 of a staged build-out.** See
+**Status: Stage 8 of a staged build-out.** See
 [`docs/roadmap.md`](docs/roadmap.md) for what is implemented versus planned.
 
 ## Features
@@ -28,11 +28,12 @@ Implemented so far:
 - Custom `404.html`, correct HEAD metadata without sending a body
 - Hardened unit/integration suite: framing, fuzz-style parser stress, raw
   malformed clients, ASan/UBSan, optional Valgrind/coverage
+- Reproducible Stage 8 benchmarking across worker counts (`make benchmark`)
 
 Planned:
 
 - Keep-alive, chunked encoding, TLS
-- Stage 8 performance benchmarks
+- Further optimizations guided by measured bottlenecks
 
 ## Architecture
 
@@ -160,6 +161,21 @@ Details: [`docs/testing.md`](docs/testing.md). The parser is exercised against
 deterministic random and mutated malformed inputs; this is regression hardening,
 not formal verification.
 
+## Benchmarking / Performance
+
+```bash
+make benchmark
+make benchmark BENCH_ARGS="--connections 128 --duration 15"
+```
+
+Compares worker configurations (`1/2/4/8` by default) on a release build,
+records throughput and latency (including p95 when the selected tool supports
+it), and writes `benchmarks/results/latest.json` (+ CSV). Requires `wrk`,
+`hey`, or `ab` on `PATH`. See [`benchmarks/README.md`](benchmarks/README.md).
+
+Localhost results are environment-dependent and are **not** production capacity
+claims. CinderHTTP still closes each connection after one request.
+
 ## Memory Safety
 
 `make debug test` runs unit tests under AddressSanitizer and
@@ -175,7 +191,8 @@ UndefinedBehaviorSanitizer. Ownership: [`docs/memory_model.md`](docs/memory_mode
 
 ## Future Work
 
-Next up is **Stage 8 — Performance**. See [`docs/roadmap.md`](docs/roadmap.md).
+Possible next steps include keep-alive, evented I/O, and other optimizations
+guided by Stage 8 measurements. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## License
 
