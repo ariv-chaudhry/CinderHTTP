@@ -10,6 +10,7 @@
 #include <stdlib.h>
 
 #include "config.h"
+#include "logger.h"
 #include "server.h"
 
 int main(int argc, char *argv[]) {
@@ -25,8 +26,8 @@ int main(int argc, char *argv[]) {
     }
 
     if (config.verbose) {
-        fprintf(stderr, "[verbose] port=%d workers=%d queue_capacity=%d root=%s\n", config.port,
-                config.worker_count, config.queue_capacity, config.document_root);
+        logger_log("[verbose] port=%d workers=%d queue_capacity=%d root=%s", config.port,
+                   config.worker_count, config.queue_capacity, config.document_root);
     }
 
     server_install_signal_handlers();

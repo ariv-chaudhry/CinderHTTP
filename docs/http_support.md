@@ -1,7 +1,8 @@
 # HTTP Support
 
-This document describes what CinderHTTP implements today (Stage 3) and what is
-intentionally out of scope.
+This document describes what CinderHTTP implements today (Stage 4) and what is
+intentionally out of scope. Concurrency schedules requests; HTTP semantics
+match Stage 3.
 
 ## Supported
 

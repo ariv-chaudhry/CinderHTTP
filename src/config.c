@@ -130,9 +130,9 @@ void config_print_usage(FILE *stream) {
             "  cinderhttp --workers 8 --root ./public\n"
             "  cinderhttp --queue-size 128 --verbose\n"
             "\n"
-            "Note: --workers and --queue-size are parsed and validated now but do not yet\n"
-            "change server behavior; the thread pool and connection queue arrive in a later\n"
-            "stage. --root is active and selects the static-file document root.\n",
+            "Concurrency: the accept thread enqueues client sockets into a bounded queue;\n"
+            "--workers sets the fixed pthread worker-pool size and --queue-size sets the\n"
+            "queue capacity (backpressure when full). --root selects the static-file root.\n",
             CONFIG_DEFAULT_PORT, CONFIG_DEFAULT_WORKER_COUNT, CONFIG_DEFAULT_QUEUE_CAPACITY,
             CONFIG_DEFAULT_DOCUMENT_ROOT);
 }

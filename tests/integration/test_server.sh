@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Integration checks for Stages 2–3 against a live CinderHTTP process.
+# Integration checks for Stages 2–4 against a live CinderHTTP process.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,33 +8,51 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 port="${CINDERHTTP_TEST_PORT:-18080}"
 bin="$repo_root/bin/cinderhttp"
 pid=""
+log="/tmp/cinderhttp-integration.log"
 
 cleanup() {
     if [[ -n "${pid}" ]] && kill -0 "$pid" 2>/dev/null; then
         kill -INT "$pid" 2>/dev/null || true
+        # Bounded wait so a hung shutdown fails the suite instead of hanging forever.
+        for _ in $(seq 1 50); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" 2>/dev/null || true
+                pid=""
+                return
+            fi
+            sleep 0.1
+        done
+        echo "WARN: server did not exit after SIGINT; sending SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
+        pid=""
     fi
 }
 trap cleanup EXIT
 
-make -C "$repo_root" --silent all
+start_server() {
+    local extra_args=("$@")
+    cleanup
+    : >"$log"
+    "$bin" --port "$port" --root "$repo_root/public" "${extra_args[@]}" >"$log" 2>&1 &
+    pid=$!
 
-"$bin" --port "$port" --root "$repo_root/public" >/tmp/cinderhttp-integration.log 2>&1 &
-pid=$!
-
-ready=0
-for _ in $(seq 1 50); do
-    if ss -ltn 2>/dev/null | grep -q ":${port}"; then
-        ready=1
-        break
+    local ready=0
+    for _ in $(seq 1 50); do
+        if ss -ltn 2>/dev/null | grep -q ":${port}"; then
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$ready" -ne 1 ]]; then
+        echo "Server failed to listen on port ${port}"
+        cat "$log" || true
+        exit 1
     fi
-    sleep 0.1
-done
-if [[ "$ready" -ne 1 ]]; then
-    echo "Server failed to listen on port ${port}"
-    cat /tmp/cinderhttp-integration.log || true
-    exit 1
-fi
+}
+
+make -C "$repo_root" --silent all
 
 fail=0
 
@@ -48,6 +66,9 @@ check() {
         fail=1
     fi
 }
+
+# --- Stage 3 baseline with Stage 4 concurrency defaults ---
+start_server --workers 4 --queue-size 16
 
 check "GET / status 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
 body="$(curl -sS "http://127.0.0.1:${port}/")"
@@ -81,10 +102,64 @@ else
     echo "SKIP: nc not available for malformed-request check"
 fi
 
+# Concurrent requests against the 4-worker pool.
+tmp_codes="$(mktemp)"
+seq 1 40 | xargs -P 8 -I{} bash -c "
+    path='/'
+    case \$(( {} % 3 )) in
+        0) path='/' ;;
+        1) path='/css/style.css' ;;
+        2) path='/does-not-exist' ;;
+    esac
+    curl -sS -o /dev/null -w '%{http_code}\n' \"http://127.0.0.1:${port}\${path}\"
+" >"$tmp_codes"
+ok_count="$(grep -E '^(200|404)$' "$tmp_codes" | wc -l | tr -d ' ')"
+line_count="$(wc -l <"$tmp_codes" | tr -d ' ')"
+check "concurrent 40 requests all answered" bash -c "test \"$line_count\" = 40"
+check "concurrent statuses only 200/404" bash -c "test \"$ok_count\" = 40"
+rm -f "$tmp_codes"
+
+# Startup banner reflects concurrency settings.
+check "startup shows workers=4" bash -c "grep -q 'workers=4' \"$log\""
+check "startup shows queue=16" bash -c "grep -q 'queue=16' \"$log\""
+
+# --- Single worker mode ---
+start_server --workers 1 --queue-size 16
+check "workers=1 GET /" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
+check "workers=1 startup banner" bash -c "grep -q 'workers=1' \"$log\""
+
+# --- Small queue backpressure ---
+start_server --workers 1 --queue-size 1
+tmp_small="$(mktemp)"
+seq 1 20 | xargs -P 10 -I{} curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${port}/" >"$tmp_small"
+small_ok="$(grep -c '^200$' "$tmp_small" || true)"
+check "queue-size=1 concurrent survives" bash -c "test \"$small_ok\" = 20"
+check "queue-size=1 server still alive" bash -c "kill -0 \"$pid\""
+rm -f "$tmp_small"
+
+# --- Shutdown under concurrency ---
+start_server --workers 4 --queue-size 8
+seq 1 30 | xargs -P 10 -I{} curl -sS -o /dev/null "http://127.0.0.1:${port}/" >/dev/null 2>&1 &
+load_pid=$!
+sleep 0.2
+kill -INT "$pid"
+exited=0
+for _ in $(seq 1 50); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+        exited=1
+        break
+    fi
+    sleep 0.1
+done
+wait "$pid" 2>/dev/null || true
+pid=""
+wait "$load_pid" 2>/dev/null || true
+check "shutdown under load exits" bash -c "test \"$exited\" = 1"
+
 if [[ "$fail" -ne 0 ]]; then
     echo "Integration tests failed. Server log:"
-    cat /tmp/cinderhttp-integration.log || true
+    cat "$log" || true
     exit 1
 fi
 
-echo "All Stage 3 integration checks passed."
+echo "All Stage 2–4 integration checks passed."

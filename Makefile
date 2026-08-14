@@ -31,9 +31,7 @@ COMMON_CFLAGS := $(STD) $(WARN_FLAGS) $(FEATURE_FLAGS) $(INCLUDES)
 RELEASE_CFLAGS := $(COMMON_CFLAGS) -O2
 DEBUG_CFLAGS := $(COMMON_CFLAGS) -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
 
-# Linked in now even though the thread pool lands in a later stage, since
-# every subsequent stage depends on pthreads and this way there is one less
-# thing to remember to change later.
+# Stage 4 worker pool and connection queue require pthreads.
 LDLIBS := -lpthread
 DEBUG_LDFLAGS := -fsanitize=address,undefined
 
@@ -95,9 +93,21 @@ FORCE:
 $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR)/tests:
 	mkdir -p $@
 
+# `make debug` builds the server with sanitizers. Prefer `make debug test` in
+# one invocation so unit-test objects also get ASan/UBSan flags (a separate
+# `make test` resets CFLAGS to the release defaults).
 debug: CFLAGS := $(DEBUG_CFLAGS)
 debug: LDFLAGS := $(DEBUG_LDFLAGS)
 debug: $(TARGET)
+
+# When both goals appear on the same command line, apply sanitizer flags to
+# everything in this make run (including test binaries).
+ifneq ($(filter debug,$(MAKECMDGOALS)),)
+ifneq ($(filter test,$(MAKECMDGOALS)),)
+CFLAGS := $(DEBUG_CFLAGS)
+LDFLAGS := $(DEBUG_LDFLAGS)
+endif
+endif
 
 -include $(DEPS)
 
@@ -131,8 +141,9 @@ help:
 	@echo "Targets:"
 	@echo "  make             - optimized build -> $(TARGET)"
 	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
+	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
 	@echo "  make test        - build and run unit tests"
-	@echo "  make integration - run curl-based Stage 2 integration checks"
+	@echo "  make integration - run curl-based Stage 2–4 integration checks"
 	@echo "  make run         - build and run the server with default config"
 	@echo "  make format      - format sources with clang-format, if installed"
 	@echo "  make clean       - remove build/ and bin/"

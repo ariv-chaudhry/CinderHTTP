@@ -43,10 +43,10 @@
 #define CONFIG_MAX_QUEUE_CAPACITY 4096
 
 /*
- * Immutable-after-startup server configuration. `worker_count` and
- * `queue_capacity` are accepted and validated now but only take effect once
- * the thread pool and connection queue are introduced later.
- * `document_root` is used by Stage 3 static file serving.
+ * Immutable-after-startup server configuration.
+ * `worker_count` sizes the fixed pthread worker pool; `queue_capacity` sizes
+ * the bounded connection queue used for accept→worker handoff.
+ * `document_root` is the static-file document root.
  */
 typedef struct {
     int port;

@@ -1,12 +1,8 @@
 /*
- * server.h - listening socket lifecycle and the accept loop.
+ * server.h - listening socket lifecycle and the accept/orchestration loop.
  *
- * Stage 3: the accept loop still handles each client inline (no worker pool
- * yet). Per connection it frames and parses one HTTP request, serves static
- * files for GET/HEAD (or a temporary POST text response), and closes the
- * socket (Connection: close). Starting with the connection queue and worker
- * pool (see docs/roadmap.md), server_run() will push accepted file
- * descriptors into a bounded queue; that change is confined to server.c.
+ * Stage 4: the accept thread only accepts connections and enqueues client
+ * file descriptors. A fixed worker pool dequeues and runs client_handle().
  */
 #ifndef CINDERHTTP_SERVER_H
 #define CINDERHTTP_SERVER_H
@@ -28,11 +24,10 @@ void server_install_signal_handlers(void);
 int server_create_listening_socket(const server_config_t *config);
 
 /*
- * Runs the accept loop until a shutdown signal (SIGINT/SIGTERM) is
- * observed. Ownership of `listen_fd` remains with the caller: this function
- * never closes it, so the caller can always call
- * server_close_listening_socket() afterwards regardless of how the loop
- * exited. Returns 0 after a clean, signal-driven shutdown.
+ * Initializes the connection queue and worker pool, then runs the accept
+ * loop until SIGINT/SIGTERM. Ownership of listen_fd remains with the caller.
+ * Returns 0 after a clean, signal-driven shutdown, or -1 if pool/queue
+ * startup failed.
  */
 int server_run(const server_config_t *config, int listen_fd);
 

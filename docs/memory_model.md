@@ -1,14 +1,66 @@
 # Memory Model
 
-Ownership rules through Stage 3. Every allocation has a clear owner and a
-matching release path.
+Ownership rules through Stage 4. Every allocation and socket has a clear owner
+and a matching release path.
+
+## Queue lifecycle
+
+```text
+init → active → shutdown → drained → destroyed
+```
+
+- `connection_queue_init()` allocates the ring and initializes mutex/condvars.
+- `connection_queue_shutdown()` only sets a flag and wakes waiters; it does
+  **not** destroy synchronization objects.
+- Workers may still pop queued descriptors after shutdown until the queue is
+  empty.
+- `connection_queue_destroy()` runs only after all workers are joined.
+
+## Thread-pool lifecycle
+
+```text
+allocate thread handles
+→ create workers
+→ workers run
+→ queue shutdown
+→ workers drain
+→ workers exit
+→ join
+→ free thread handles
+```
+
+Partial `pthread_create` failure: shut down the queue, join already-created
+workers, free handles, report failure. Startup either leaves a valid pool or
+fails cleanly.
+
+Destruction order (required):
+
+```text
+shutdown queue → join workers → destroy pool handles → destroy queue
+```
+
+Never destroy the queue mutex/condvars while a worker might still wait on them.
+
+## Socket / file-descriptor ownership
+
+| Stage | Owner | Close responsibility |
+|-------|-------|----------------------|
+| Before `accept()` | — | No client fd exists |
+| After successful `accept()` | Accept / server thread | Must close if not successfully queued |
+| After successful `connection_queue_push()` | Queue / worker subsystem | Accept thread must **not** close |
+| After `connection_queue_pop()` | That worker | Passes to `client_handle()` |
+| Inside `client_handle()` | Client handler | Closes exactly once on all paths |
+| Push fails (shutdown / abort) | Accept thread | Close exactly once; ownership never transferred |
+
+No descriptor should be leaked, processed twice, or closed twice.
+
+Listening socket remains owned by `main()` for the whole process lifetime.
 
 ## Raw receive buffer
 
 - Allocated by `http_read_request()` via `malloc`/`realloc`.
 - On success, ownership is transferred to the caller through `*buffer`.
-- `handle_client()` in `server.c` frees this buffer after parsing (including
-  error paths).
+- `client_handle()` frees this buffer after parsing (including error paths).
 
 ## `http_request_t`
 
@@ -64,20 +116,22 @@ need no free.
 the caller's `http_response_t` and retagged as status 404. On failure, a
 generated HTML error body is allocated instead.
 
-## Client sockets
+## Logger
 
-- Accepted in `server_run()`, owned by `handle_client()` for the request.
-- Always closed at the end of `handle_client()`.
-- Listening socket remains owned by `main()`.
+`logger` uses a process-wide mutex around each complete log line. It must not
+be used from signal handlers. Workers may call it concurrently; lines do not
+interleave.
 
 ## Configuration
 
 - `server_config_t` is a stack object in `main()` with no dynamic allocations.
   `document_root` is a fixed-size array inside the struct.
+- After startup, config is treated as read-only and shared by all workers
+  without locking.
 
 ## Known limitation (TOCTOU)
 
 Path validation uses `realpath`/`stat` then later `fopen`. A race between
 those calls is possible on a shared filesystem. This educational server does
 not claim production-grade sandboxing; descriptor-based hardening can be
-explored later without changing the Stage 3 API shape.
+explored later without changing the Stage 4 API shape.
