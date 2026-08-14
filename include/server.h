@@ -1,8 +1,13 @@
 /*
  * server.h - listening socket lifecycle and the accept/orchestration loop.
  *
- * Stage 4: the accept thread only accepts connections and enqueues client
- * file descriptors. A fixed worker pool dequeues and runs client_handle().
+ * The accept thread only accepts connections and enqueues client file
+ * descriptors. A fixed worker pool dequeues and runs client_handle().
+ *
+ * Shutdown policy (Stage 6): SIGINT/SIGTERM set a sig_atomic_t flag only.
+ * The accept loop exits, the queue enters shutdown, workers drain already
+ * queued clients, then workers are joined and subsystems are destroyed.
+ * SIGPIPE is ignored so a disconnected client cannot kill the process.
  */
 #ifndef CINDERHTTP_SERVER_H
 #define CINDERHTTP_SERVER_H
@@ -10,9 +15,9 @@
 #include "config.h"
 
 /*
- * Installs SIGINT/SIGTERM handlers that request a graceful shutdown. Must
- * be called once during startup, before server_run(). See server.c for the
- * async-signal-safety reasoning behind the handler's design.
+ * Installs SIGINT/SIGTERM handlers that request a graceful shutdown, and
+ * ignores SIGPIPE. Must be called once during startup, before server_run().
+ * See server.c for async-signal-safety and shutdown sequencing.
  */
 void server_install_signal_handlers(void);
 
@@ -24,10 +29,10 @@ void server_install_signal_handlers(void);
 int server_create_listening_socket(const server_config_t *config);
 
 /*
- * Initializes the connection queue and worker pool, then runs the accept
- * loop until SIGINT/SIGTERM. Ownership of listen_fd remains with the caller.
- * Returns 0 after a clean, signal-driven shutdown, or -1 if pool/queue
- * startup failed.
+ * Initializes logger/stats/queue/worker pool, then runs the accept loop until
+ * SIGINT/SIGTERM. Ownership of listen_fd remains with the caller.
+ * Returns 0 after a clean, signal-driven shutdown, or -1 if startup failed
+ * (partial initialization is rolled back before returning).
  */
 int server_run(const server_config_t *config, int listen_fd);
 

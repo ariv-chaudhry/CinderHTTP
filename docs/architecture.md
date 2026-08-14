@@ -1,7 +1,7 @@
 # Architecture
 
-CinderHTTP Stage 5 adds an application router and thread-safe runtime stats on
-top of the Stage 4 producer–consumer worker pool.
+CinderHTTP Stage 6 hardens lifecycle and shutdown on top of the Stage 4–5
+producer–consumer worker pool, application router, and runtime stats.
 
 ## Overview
 
@@ -105,6 +105,40 @@ Shared synchronized state (does **not** serialize request handling):
 - Known path + wrong method → **405** + `Allow`.
 - Unknown `/api/*` → JSON **404** (never static fallback).
 - Non-`/api` paths → static GET/HEAD; other methods → **405**.
+
+## Graceful shutdown
+
+```text
+SIGINT / SIGTERM
+      |
+      v
+shutdown flag (sig_atomic_t only)
+      |
+      v
+accept loop exits (accept EINTR / push abort)
+      |
+      v
+connection_queue_shutdown + broadcast
+      |
+      v
+workers drain already-queued clients
+      |
+      v
+workers exit (empty && shutting_down)
+      |
+      v
+pthread_join all started workers
+      |
+      v
+destroy pool → queue → stats → logger
+      |
+      v
+main closes listening socket
+```
+
+Policy: **drain connections that successfully entered the application queue**.
+Do not discard queued fds during normal shutdown. SIGPIPE is ignored so a
+worker writing to a disconnected client cannot terminate the process.
 
 ## Stats lock scope
 

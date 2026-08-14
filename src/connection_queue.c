@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static void timespec_add_ms(struct timespec *ts, long ms) {
     ts->tv_sec += ms / 1000;
@@ -34,25 +35,23 @@ int connection_queue_init(connection_queue_t *queue, size_t capacity) {
         queue->items = NULL;
         return -1;
     }
+    queue->mutex_initialized = 1;
 
     err = pthread_cond_init(&queue->not_empty, NULL);
     if (err != 0) {
         fprintf(stderr, "cinderhttp: pthread_cond_init(not_empty): %s\n", strerror(err));
-        pthread_mutex_destroy(&queue->mutex);
-        free(queue->items);
-        queue->items = NULL;
+        connection_queue_destroy(queue);
         return -1;
     }
+    queue->not_empty_initialized = 1;
 
     err = pthread_cond_init(&queue->not_full, NULL);
     if (err != 0) {
         fprintf(stderr, "cinderhttp: pthread_cond_init(not_full): %s\n", strerror(err));
-        pthread_cond_destroy(&queue->not_empty);
-        pthread_mutex_destroy(&queue->mutex);
-        free(queue->items);
-        queue->items = NULL;
+        connection_queue_destroy(queue);
         return -1;
     }
+    queue->not_full_initialized = 1;
 
     return 0;
 }
@@ -62,14 +61,34 @@ void connection_queue_destroy(connection_queue_t *queue) {
         return;
     }
 
-    if (queue->items != NULL) {
-        pthread_cond_destroy(&queue->not_full);
-        pthread_cond_destroy(&queue->not_empty);
-        pthread_mutex_destroy(&queue->mutex);
-        free(queue->items);
-        queue->items = NULL;
+    /* Defensive: close any leftover fds if destroy runs without a full drain. */
+    if (queue->items != NULL && queue->count > 0) {
+        for (size_t i = 0; i < queue->count; i++) {
+            size_t idx = (queue->head + i) % queue->capacity;
+            int fd = queue->items[idx];
+            if (fd >= 0) {
+                close(fd);
+                queue->items[idx] = -1;
+            }
+        }
+        queue->count = 0;
     }
 
+    if (queue->not_full_initialized) {
+        pthread_cond_destroy(&queue->not_full);
+        queue->not_full_initialized = 0;
+    }
+    if (queue->not_empty_initialized) {
+        pthread_cond_destroy(&queue->not_empty);
+        queue->not_empty_initialized = 0;
+    }
+    if (queue->mutex_initialized) {
+        pthread_mutex_destroy(&queue->mutex);
+        queue->mutex_initialized = 0;
+    }
+
+    free(queue->items);
+    queue->items = NULL;
     queue->capacity = 0;
     queue->head = 0;
     queue->tail = 0;
@@ -122,11 +141,9 @@ connection_queue_status_t connection_queue_push(connection_queue_t *queue, int c
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->count++;
 
-    err = pthread_cond_signal(&queue->not_empty);
+    /* Ownership transferred; do not return ERROR after this point. */
+    (void)pthread_cond_signal(&queue->not_empty);
     pthread_mutex_unlock(&queue->mutex);
-    if (err != 0) {
-        return CONNECTION_QUEUE_ERROR;
-    }
     return CONNECTION_QUEUE_OK;
 }
 
@@ -158,22 +175,24 @@ connection_queue_status_t connection_queue_pop(connection_queue_t *queue, int *c
     queue->head = (queue->head + 1) % queue->capacity;
     queue->count--;
 
-    err = pthread_cond_signal(&queue->not_full);
+    /* Caller owns *client_fd; do not return ERROR after this point. */
+    (void)pthread_cond_signal(&queue->not_full);
     pthread_mutex_unlock(&queue->mutex);
-    if (err != 0) {
-        return CONNECTION_QUEUE_ERROR;
-    }
     return CONNECTION_QUEUE_OK;
 }
 
 void connection_queue_shutdown(connection_queue_t *queue) {
-    if (queue == NULL) {
+    if (queue == NULL || !queue->mutex_initialized) {
         return;
     }
 
     pthread_mutex_lock(&queue->mutex);
     queue->shutting_down = 1;
-    pthread_cond_broadcast(&queue->not_empty);
-    pthread_cond_broadcast(&queue->not_full);
+    if (queue->not_empty_initialized) {
+        pthread_cond_broadcast(&queue->not_empty);
+    }
+    if (queue->not_full_initialized) {
+        pthread_cond_broadcast(&queue->not_full);
+    }
     pthread_mutex_unlock(&queue->mutex);
 }

@@ -5,9 +5,18 @@
  * two condition variables protect the ring buffer and provide backpressure
  * when the queue is full.
  *
- * Ownership: after a successful push, the queue (and eventually the worker
- * that pops) owns the descriptor. On push failure due to shutdown, ownership
- * remains with the caller, who must close the fd.
+ * Ownership:
+ *   - After a successful push (CONNECTION_QUEUE_OK), the queue/worker
+ *     subsystem owns the descriptor. The producer must not close it.
+ *   - On CONNECTION_QUEUE_SHUTDOWN or CONNECTION_QUEUE_ERROR from push,
+ *     ownership remains with the caller, who must close the fd.
+ *   - After a successful pop, the calling worker owns the descriptor and
+ *     must eventually close it (normally via client_handle()).
+ *
+ * Shutdown policy (Stage 6):
+ *   Graceful shutdown drains descriptors that are already queued. Workers
+ *   exit only when shutting_down && count == 0. Producers blocked on a full
+ *   queue wake via broadcast and/or the optional abort_flag.
  */
 #ifndef CINDERHTTP_CONNECTION_QUEUE_H
 #define CINDERHTTP_CONNECTION_QUEUE_H
@@ -24,6 +33,12 @@ typedef struct {
     size_t count;
 
     int shutting_down;
+
+    /* Tracks which sync primitives were successfully initialized so destroy
+     * never tears down objects that were never created (partial init). */
+    int mutex_initialized;
+    int not_empty_initialized;
+    int not_full_initialized;
 
     pthread_mutex_t mutex;
     pthread_cond_t not_empty;
@@ -42,8 +57,11 @@ typedef enum {
  */
 int connection_queue_init(connection_queue_t *queue, size_t capacity);
 
-/* Destroys mutex/condvars and frees the ring buffer. Call only after all
- * threads that use the queue have been joined. */
+/*
+ * Destroys mutex/condvars and frees the ring buffer. Call only after all
+ * threads that use the queue have been joined. Any leftover descriptors
+ * still present (should not happen after a normal drain) are closed.
+ */
 void connection_queue_destroy(connection_queue_t *queue);
 
 /*
@@ -54,6 +72,9 @@ void connection_queue_destroy(connection_queue_t *queue);
  * queue without calling pthread APIs from a signal handler. When abort_flag
  * becomes non-zero, returns CONNECTION_QUEUE_SHUTDOWN without enqueueing;
  * the caller still owns client_fd and must close it.
+ *
+ * After a successful enqueue, returns CONNECTION_QUEUE_OK even if waking a
+ * consumer fails — ownership has already transferred.
  */
 connection_queue_status_t connection_queue_push(connection_queue_t *queue, int client_fd,
                                                 const volatile sig_atomic_t *abort_flag);
@@ -62,6 +83,9 @@ connection_queue_status_t connection_queue_push(connection_queue_t *queue, int c
  * Dequeues into *client_fd. Blocks while empty unless shutting down.
  * After shutdown, continues returning already-queued descriptors; once the
  * queue is empty and shutting_down is set, returns CONNECTION_QUEUE_SHUTDOWN.
+ *
+ * After a successful dequeue, returns CONNECTION_QUEUE_OK even if waking a
+ * producer fails — the caller already owns *client_fd.
  */
 connection_queue_status_t connection_queue_pop(connection_queue_t *queue, int *client_fd);
 

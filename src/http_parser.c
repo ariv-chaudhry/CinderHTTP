@@ -512,6 +512,10 @@ http_parse_result_t http_parse_request(const unsigned char *data, size_t data_le
     if (body_length > 0) {
         /* Allocate body_length + 1 so callers can treat the buffer as a C
          * string when the body is textual, but always trust body_length. */
+        if (body_length == SIZE_MAX) {
+            http_request_destroy(request);
+            return HTTP_PARSE_TOO_LARGE;
+        }
         request->body = malloc(body_length + 1);
         if (request->body == NULL) {
             http_request_destroy(request);

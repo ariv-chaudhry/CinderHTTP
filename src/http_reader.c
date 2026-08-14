@@ -92,6 +92,10 @@ http_read_result_t http_read_request(int client_fd, unsigned char **buffer,
                 return HTTP_READ_TOO_LARGE;
             }
         } else {
+            if (body_length > HTTP_MAX_MESSAGE_BYTES - (header_end + 4)) {
+                free(data);
+                return HTTP_READ_TOO_LARGE;
+            }
             size_t total_needed = header_end + 4 + body_length;
             if (length >= total_needed) {
                 break;
@@ -154,7 +158,8 @@ http_read_result_t http_read_request(int client_fd, unsigned char **buffer,
                 return map_framing_error(framing);
             }
 
-            if (header_bytes + body_length > HTTP_MAX_MESSAGE_BYTES) {
+            /* Overflow-safe: body_length is untrusted until compared this way. */
+            if (body_length > HTTP_MAX_MESSAGE_BYTES - header_bytes) {
                 free(data);
                 return HTTP_READ_TOO_LARGE;
             }
@@ -167,6 +172,11 @@ http_read_result_t http_read_request(int client_fd, unsigned char **buffer,
                 break;
             }
         } else {
+            /* headers_complete: total_needed was validated against message max. */
+            if (body_length > HTTP_MAX_MESSAGE_BYTES - (header_end + 4)) {
+                free(data);
+                return HTTP_READ_TOO_LARGE;
+            }
             size_t total_needed = header_end + 4 + body_length;
             if (length >= total_needed) {
                 length = total_needed;

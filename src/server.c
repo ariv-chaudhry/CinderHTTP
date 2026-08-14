@@ -55,6 +55,20 @@ void server_install_signal_handlers(void) {
     if (sigaction(SIGTERM, &action, NULL) < 0) {
         perror("cinderhttp: sigaction(SIGTERM)");
     }
+
+    /*
+     * Ignore SIGPIPE so a worker writing to a client that already disconnected
+     * cannot terminate the whole process. send_all() also uses MSG_NOSIGNAL
+     * where available; SIG_IGN is the portable baseline.
+     */
+    struct sigaction pipe_action;
+    memset(&pipe_action, 0, sizeof(pipe_action));
+    pipe_action.sa_handler = SIG_IGN;
+    sigemptyset(&pipe_action.sa_mask);
+    pipe_action.sa_flags = 0;
+    if (sigaction(SIGPIPE, &pipe_action, NULL) < 0) {
+        perror("cinderhttp: sigaction(SIGPIPE)");
+    }
 }
 
 int server_create_listening_socket(const server_config_t *config) {
@@ -107,43 +121,56 @@ static void log_connection_if_verbose(const server_config_t *config,
 }
 
 int server_run(const server_config_t *config, int listen_fd) {
-    if (logger_init() != 0) {
-        fprintf(stderr, "cinderhttp: logger_init failed\n");
-        return -1;
-    }
+    /*
+     * Initialization order and reverse cleanup on failure:
+     *   logger → stats → queue → pool alloc → workers
+     * Shutdown (happy path) drains the queue before destroy:
+     *   queue_shutdown → join workers → destroy pool → queue → stats → logger
+     */
+    int logger_ready = 0;
+    int stats_ready = 0;
+    int queue_ready = 0;
+    int pool_ready = 0;
+    int workers_running = 0;
+    int result = -1;
 
     server_stats_t stats;
+    connection_queue_t queue;
+    thread_pool_t pool;
+    memset(&stats, 0, sizeof(stats));
+    memset(&queue, 0, sizeof(queue));
+    memset(&pool, 0, sizeof(pool));
+
+    if (logger_init() != 0) {
+        fprintf(stderr, "cinderhttp: logger_init failed\n");
+        goto cleanup;
+    }
+    logger_ready = 1;
+
     if (server_stats_init(&stats) != 0) {
         fprintf(stderr, "cinderhttp: failed to initialize server stats\n");
-        logger_destroy();
-        return -1;
+        goto cleanup;
     }
+    stats_ready = 1;
 
-    connection_queue_t queue;
     if (connection_queue_init(&queue, (size_t)config->queue_capacity) != 0) {
         fprintf(stderr, "cinderhttp: failed to initialize connection queue\n");
-        server_stats_destroy(&stats);
-        logger_destroy();
-        return -1;
+        goto cleanup;
     }
+    queue_ready = 1;
 
-    thread_pool_t pool;
     if (thread_pool_init(&pool, (size_t)config->worker_count, &queue, config, &stats) != 0) {
         fprintf(stderr, "cinderhttp: failed to initialize thread pool\n");
-        connection_queue_destroy(&queue);
-        server_stats_destroy(&stats);
-        logger_destroy();
-        return -1;
+        goto cleanup;
     }
+    pool_ready = 1;
 
     if (thread_pool_start(&pool) != 0) {
         fprintf(stderr, "cinderhttp: failed to start worker threads\n");
-        thread_pool_destroy(&pool);
-        connection_queue_destroy(&queue);
-        server_stats_destroy(&stats);
-        logger_destroy();
-        return -1;
+        /* thread_pool_start already shut down the queue and joined partial workers. */
+        goto cleanup;
     }
+    workers_running = 1;
 
     printf("CinderHTTP listening on port %d (root=%s, workers=%d, queue=%d)\n", config->port,
            config->document_root, config->worker_count, config->queue_capacity);
@@ -168,7 +195,7 @@ int server_run(const server_config_t *config, int listen_fd) {
 
         /*
          * Ownership: accept thread owns client_fd until push succeeds.
-         * On shutdown/abort, push does not take ownership — close here.
+         * On shutdown/abort/error, push does not take ownership — close here.
          */
         connection_queue_status_t push_status =
             connection_queue_push(&queue, client_fd, &g_shutdown_requested);
@@ -181,18 +208,45 @@ int server_run(const server_config_t *config, int listen_fd) {
             continue;
         }
 
-        /* Fd is in the worker subsystem (queued or soon handled). */
+        /* Fd entered the worker subsystem (queued or soon handled). */
         server_stats_connection_started(&stats);
     }
 
-    /* Wake blocked producers/consumers; workers drain remaining fds. */
-    connection_queue_shutdown(&queue);
-    thread_pool_join(&pool);
-    thread_pool_destroy(&pool);
-    connection_queue_destroy(&queue);
-    server_stats_destroy(&stats);
-    logger_destroy();
-    return 0;
+    /*
+     * Graceful shutdown: stop accepting, wake waiters, drain already-queued
+     * clients, join workers, then destroy subsystems in reverse order.
+     */
+    result = 0;
+
+cleanup:
+    if (workers_running || (pool_ready && queue_ready)) {
+        /* Ensure workers cannot block forever if we failed after start, or
+         * during normal shutdown after the accept loop. */
+        if (queue_ready) {
+            connection_queue_shutdown(&queue);
+        }
+        if (pool_ready) {
+            thread_pool_join(&pool);
+            workers_running = 0;
+        }
+    }
+    if (pool_ready) {
+        thread_pool_destroy(&pool);
+        pool_ready = 0;
+    }
+    if (queue_ready) {
+        connection_queue_destroy(&queue);
+        queue_ready = 0;
+    }
+    if (stats_ready) {
+        server_stats_destroy(&stats);
+        stats_ready = 0;
+    }
+    if (logger_ready) {
+        logger_destroy();
+        logger_ready = 0;
+    }
+    return result;
 }
 
 void server_close_listening_socket(int listen_fd) {

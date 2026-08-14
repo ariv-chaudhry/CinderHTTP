@@ -143,11 +143,13 @@ static int handle_static_get_head(const server_config_t *config, const http_requ
 
 /*
  * Per-connection lifecycle:
- *   start active accounting -> read -> parse -> route/static -> send once ->
- *   response accounting -> finish active accounting -> close.
+ *   (active_connections already +1 after successful queue push)
+ *   read → parse → route/static → send once → response accounting →
+ *   finish active accounting → close fd exactly once.
  *
  * Exactly one response class counter is incremented when an HTTP response is
  * successfully sent. I/O failures with no HTTP response do not invent a status.
+ * Ownership of client_fd transfers to this function and is closed on every path.
  */
 void client_handle(const server_config_t *config, server_stats_t *stats, int client_fd,
                    int worker_id) {

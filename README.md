@@ -8,7 +8,7 @@ It implements manual HTTP parsing, an application router, secure static file
 serving, MIME detection, thread-safe verbose logging, runtime statistics, and
 graceful signal-driven shutdown — without an HTTP framework or parsing library.
 
-**Status: Stage 5 of a staged build-out.** See
+**Status: Stage 6 of a staged build-out.** See
 [`docs/roadmap.md`](docs/roadmap.md) for what is implemented versus planned.
 
 ## Features
@@ -19,18 +19,19 @@ Implemented so far:
   `--verbose`, `--help`)
 - TCP listening socket with `SO_REUSEADDR` and signal-driven shutdown
 - Bounded connection queue + fixed pthread worker pool (backpressure when full)
+- Graceful queue-draining shutdown; SIGPIPE isolation for broken clients
 - Thread-safe logging and runtime statistics
 - Buffered multi-`recv()` HTTP request framing and manual HTTP/1.0–1.1 parsing
 - Application router: `GET /api/health`, `POST /api/echo`, `GET /api/stats`
 - Secure static file serving with MIME detection and binary-safe responses
 - Path traversal protection (literal and percent-encoded) + symlink escape checks
 - Custom `404.html`, correct HEAD metadata without sending a body
-- Unit tests (queue, router, stats) and curl/nc integration checks
+- Unit/integration tests including reliability and sanitizer builds
 
 Planned:
 
 - Keep-alive, chunked encoding, TLS, benchmarks
-- Broader reliability / sanitizer audit (Stage 6)
+- Broader Stage 7 testing pass
 
 ## Architecture
 
@@ -117,6 +118,8 @@ Requires GCC (or another C11 compiler), GNU Make, and a POSIX environment
 make            # optimized build -> bin/cinderhttp
 make debug      # ASan/UBSan debug build
 make debug test # sanitizer build + unit tests in one make run
+make sanitize   # convenience alias for ASan/UBSan unit tests
+make valgrind   # unit tests under Valgrind (skipped if not installed)
 make clean
 ```
 
@@ -162,8 +165,8 @@ UndefinedBehaviorSanitizer. Ownership: [`docs/memory_model.md`](docs/memory_mode
 
 ## Future Work
 
-Next up is **Stage 6 — Reliability** (shutdown/audit hardening). See
-[`docs/roadmap.md`](docs/roadmap.md).
+Next up is **Stage 7 — broader testing hardening**, then Stage 8 performance.
+See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## License
 

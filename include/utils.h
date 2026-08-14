@@ -16,7 +16,12 @@
  * it may write only part of the data if the socket's send buffer is nearly
  * full, and it can be interrupted by a signal. send_all() retries until
  * either all `length` bytes have been written or an unrecoverable error
- * occurs, so callers never have to reason about partial writes themselves.
+ * occurs.
+ *
+ * On platforms that define MSG_NOSIGNAL, that flag is used so a write to a
+ * closed peer does not raise SIGPIPE. The server also installs SIG_IGN for
+ * SIGPIPE as a portable baseline. A disconnected client therefore surfaces
+ * as a normal I/O failure (-1), not process death.
  *
  * Returns `length` (cast to ssize_t) on success, or -1 if send() failed
  * with an error other than EINTR (errno is left as set by send()).

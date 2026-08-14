@@ -1,7 +1,27 @@
 # Memory Model
 
-Ownership rules through Stage 5. Every allocation and socket has a clear owner
+Ownership rules through Stage 6. Every allocation and socket has a clear owner
 and a matching release path.
+
+## Process / subsystem lifetime
+
+```text
+logger_init
+→ stats_init
+→ queue_init
+→ thread_pool_init
+→ thread_pool_start
+→ accept loop
+→ queue_shutdown (drain)
+→ thread_pool_join
+→ thread_pool_destroy
+→ queue_destroy
+→ stats_destroy
+→ logger_destroy
+→ close listen_fd (main)
+```
+
+Partial initialization reverses only successfully created steps.
 
 ## Queue lifecycle
 
@@ -10,11 +30,13 @@ init → active → shutdown → drained → destroyed
 ```
 
 - `connection_queue_init()` allocates the ring and initializes mutex/condvars.
+  Init flags track which primitives exist so destroy is safe after partial fail.
 - `connection_queue_shutdown()` only sets a flag and wakes waiters; it does
   **not** destroy synchronization objects.
 - Workers may still pop queued descriptors after shutdown until the queue is
   empty.
-- `connection_queue_destroy()` runs only after all workers are joined.
+- `connection_queue_destroy()` runs only after all workers are joined. Leftover
+  fds (should not exist after a normal drain) are closed defensively.
 
 ## Thread-pool lifecycle
 
@@ -31,7 +53,7 @@ allocate thread handles
 
 Partial `pthread_create` failure: shut down the queue, join already-created
 workers, free handles, report failure. Startup either leaves a valid pool or
-fails cleanly.
+fails cleanly. Only `started_count` threads are joined.
 
 Destruction order (required):
 
@@ -46,16 +68,18 @@ Never destroy `server_stats_t` until workers are joined.
 
 | Stage | Owner | Close responsibility |
 |-------|-------|----------------------|
+| Listening socket | `main()` | `server_close_listening_socket()` after `server_run` |
 | Before `accept()` | — | No client fd exists |
 | After successful `accept()` | Accept / server thread | Must close if not successfully queued |
 | After successful `connection_queue_push()` | Queue / worker subsystem | Accept thread must **not** close |
 | After `connection_queue_pop()` | That worker | Passes to `client_handle()` |
 | Inside `client_handle()` | Client handler | Closes exactly once on all paths |
-| Push fails (shutdown / abort) | Accept thread | Close exactly once; ownership never transferred |
+| Push fails (shutdown/error) | Accept thread | Close exactly once; ownership never transferred |
 
 No descriptor should be leaked, processed twice, or closed twice.
 
-Listening socket remains owned by `main()` for the whole process lifetime.
+Worker `worker_arg_t` allocations are freed by the worker thread immediately
+after startup (or by `thread_pool_start` if `pthread_create` fails).
 
 ## Raw receive buffer
 

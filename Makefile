@@ -3,6 +3,8 @@
 # Targets:
 #   make           - optimized build            -> bin/cinderhttp
 #   make debug     - ASan/UBSan debug build      -> bin/cinderhttp
+#   make sanitize   - ASan/UBSan unit tests (convenience)
+#   make valgrind   - unit tests under Valgrind (optional; skipped if missing)
 #   make test      - build and run unit tests under tests/
 #   make run       - build (if needed) and run the server with default config
 #   make format    - run scripts/format.sh (clang-format, if installed)
@@ -67,7 +69,7 @@ CFLAGS_MARKER := $(BUILD_DIR)/.cflags
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug test integration clean run format help FORCE
+.PHONY: all debug test integration sanitize valgrind clean run format help FORCE
 
 all: $(TARGET)
 
@@ -109,6 +111,12 @@ LDFLAGS := $(DEBUG_LDFLAGS)
 endif
 endif
 
+# `make sanitize` is an alias for a one-shot ASan/UBSan build + unit tests.
+ifneq ($(filter sanitize,$(MAKECMDGOALS)),)
+CFLAGS := $(DEBUG_CFLAGS)
+LDFLAGS := $(DEBUG_LDFLAGS)
+endif
+
 -include $(DEPS)
 
 $(BUILD_DIR)/tests/%: $(TEST_DIR)/%.c $(CORE_OBJS) | $(BUILD_DIR)/tests
@@ -124,6 +132,22 @@ test: $(TEST_BINS)
 			$$t || exit 1; \
 		done; \
 	fi
+
+sanitize: test
+	@echo "sanitize: ASan/UBSan unit tests completed"
+
+# Optional: requires valgrind installed. Normal `make test` does not.
+valgrind: $(TEST_BINS)
+	@if ! command -v valgrind >/dev/null 2>&1; then \
+		echo "valgrind: not installed; skipping (install valgrind to enable)."; \
+		exit 0; \
+	fi; \
+	for t in $(TEST_BINS); do \
+		echo "== Valgrind $$t =="; \
+		valgrind --quiet --leak-check=full --show-leak-kinds=all --track-origins=yes \
+			--error-exitcode=1 $$t || exit 1; \
+	done; \
+	echo "valgrind: all unit tests clean"
 
 integration: all
 	@bash tests/integration/test_server.sh
@@ -142,8 +166,10 @@ help:
 	@echo "  make             - optimized build -> $(TARGET)"
 	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
 	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
+	@echo "  make sanitize    - ASan/UBSan unit tests (convenience alias)"
 	@echo "  make test        - build and run unit tests"
-	@echo "  make integration - run curl-based Stage 2–5 integration checks"
+	@echo "  make valgrind    - run unit tests under Valgrind (if installed)"
+	@echo "  make integration - run curl-based Stage 2–6 integration checks"
 	@echo "  make run         - build and run the server with default config"
 	@echo "  make format      - format sources with clang-format, if installed"
 	@echo "  make clean       - remove build/ and bin/"

@@ -4,8 +4,9 @@ CinderHTTP is being built in controlled stages rather than all at once.
 Checkboxes are only marked complete once the corresponding behavior has
 actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 5 complete** - application router, `/api/health`,
-`/api/echo`, `/api/stats`, and thread-safe runtime statistics.
+Current status: **Stage 6 complete** - graceful queue-draining shutdown,
+partial-init cleanup, SIGPIPE isolation, send-all hardening, ownership audit,
+sanitizer-verified reliability tests.
 
 ## Phase 1 - TCP Core
 
@@ -58,13 +59,13 @@ Current status: **Stage 5 complete** - application router, `/api/health`,
 
 ## Phase 6 - Reliability
 
-- [ ] Graceful shutdown, full version (drain/stop worker pool, join threads,
+- [x] Graceful shutdown, full version (drain/stop worker pool, join threads,
       destroy synchronization primitives, free all allocations)
-- [ ] Malformed-request handling audit
-- [ ] Memory cleanup audit
-- [ ] AddressSanitizer / UndefinedBehaviorSanitizer clean run — *Stage 2–5
-      unit tests were run under ASan/UBSan; broader process audit remains*
-- [ ] Valgrind clean run
+- [x] Malformed-request handling audit
+- [x] Memory cleanup audit
+- [x] AddressSanitizer / UndefinedBehaviorSanitizer clean run
+- [x] Valgrind support target added (`make valgrind`); clean unit-test run
+      completed in this environment
 
 ## Phase 7 - Testing
 
@@ -73,7 +74,8 @@ Current status: **Stage 5 complete** - application router, `/api/health`,
 - [x] Router tests
 - [x] Security tests (path traversal, encoded traversal, symlink escape,
       malformed percent-encoding, embedded NUL)
-- [x] Integration tests (curl/nc; Stage 2–5 concurrency + API subset)
+- [x] Integration tests (curl; Stage 2–6 concurrency + API + shutdown)
+- [ ] Broader regression / fuzz-style hardening beyond Stage 6 coverage
 
 ## Phase 8 - Performance
 
@@ -83,16 +85,11 @@ Current status: **Stage 5 complete** - application router, `/api/health`,
 
 ---
 
-### Notes on Stage 5
+### Notes on Stage 6
 
-- `/api/` is an application-owned namespace and never falls through to static
-  files (even if a matching path exists under `--root`).
-- Route matching uses exact path equality after stripping the query string;
-  trailing slashes are significant (`/api/health/` ≠ `/api/health`).
-- Wrong methods on known API paths return **405** with an `Allow` header;
-  unknown API paths return JSON **404**.
-- Temporary Stage 2 “POST always succeeds” behavior is removed; non-API POST
-  returns **405**.
-- Stats counters are mutex-protected; snapshots are copied before JSON is
-  formatted so the lock is not held during I/O.
-- Phase 6 still tracks a fuller reliability/audit pass.
+- Already-queued connections are drained before workers exit.
+- Signal handlers only set `sig_atomic_t` (plus `SIGPIPE` → `SIG_IGN`).
+- Partial initialization reverses only successfully created subsystems.
+- `send_all()` retries partial writes; MSG_NOSIGNAL + SIG_IGN prevent
+  process death on client disconnect.
+- Stage 7 remains a broader testing pass before Stage 8 performance work.

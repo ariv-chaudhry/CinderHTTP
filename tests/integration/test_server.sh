@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Integration checks for Stages 2–5 against a live CinderHTTP process.
+# Integration checks for Stages 2–6 against a live CinderHTTP process.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,26 +30,48 @@ cleanup() {
 }
 trap cleanup EXIT
 
-start_server() {
-    local extra_args=("$@")
-    cleanup
-    : >"$log"
-    "$bin" --port "$port" --root "$repo_root/public" "${extra_args[@]}" >"$log" 2>&1 &
-    pid=$!
-
+wait_for_ready() {
     local ready=0
     for _ in $(seq 1 50); do
-        if ss -ltn 2>/dev/null | grep -q ":${port}"; then
+        if curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
             ready=1
             break
         fi
         sleep 0.1
     done
     if [[ "$ready" -ne 1 ]]; then
-        echo "Server failed to listen on port ${port}"
+        echo "Server failed to become ready on port ${port}"
         cat "$log" || true
         exit 1
     fi
+}
+
+start_server() {
+    local extra_args=("$@")
+    cleanup
+    : >"$log"
+    "$bin" --port "$port" --root "$repo_root/public" "${extra_args[@]}" >"$log" 2>&1 &
+    pid=$!
+    wait_for_ready
+}
+
+stop_server_signal() {
+    local sig="$1"
+    if [[ -z "${pid}" ]]; then
+        return
+    fi
+    kill "-${sig}" "$pid" 2>/dev/null || true
+    local exited=0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            exited=1
+            break
+        fi
+        sleep 0.1
+    done
+    wait "$pid" 2>/dev/null || true
+    pid=""
+    [[ "$exited" -eq 1 ]]
 }
 
 make -C "$repo_root" --silent all
@@ -211,24 +233,45 @@ check "queue-size=1 concurrent survives" bash -c "test \"$small_ok\" = 20"
 check "queue-size=1 server still alive" bash -c "kill -0 \"$pid\""
 rm -f "$tmp_small"
 
-# --- Shutdown under concurrency ---
+# --- Shutdown under concurrency (SIGINT) ---
 start_server --workers 4 --queue-size 8
 seq 1 30 | xargs -P 10 -I{} curl -sS -o /dev/null "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1 &
 load_pid=$!
 sleep 0.2
-kill -INT "$pid"
-exited=0
-for _ in $(seq 1 50); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-        exited=1
+check "SIGINT under load exits" stop_server_signal INT
+wait "$load_pid" 2>/dev/null || true
+
+# --- Stage 6: SIGTERM clean exit ---
+start_server --workers 2 --queue-size 8
+check "SIGTERM preflight health" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+check "SIGTERM clean exit" stop_server_signal TERM
+
+# --- Stage 6: repeated start/stop ---
+restart_ok=1
+for i in $(seq 1 5); do
+    start_server --workers 2 --queue-size 8
+    if ! curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null; then
+        restart_ok=0
         break
     fi
-    sleep 0.1
+    if ! stop_server_signal TERM; then
+        restart_ok=0
+        break
+    fi
 done
-wait "$pid" 2>/dev/null || true
-pid=""
-wait "$load_pid" 2>/dev/null || true
-check "shutdown under load exits" bash -c "test \"$exited\" = 1"
+check "repeated start/stop x5" bash -c "test \"$restart_ok\" = 1"
+
+# --- Stage 6: client disconnect during response must not kill server ---
+start_server --workers 2 --queue-size 8
+# Open a connection and abort before finishing the response read.
+(
+  exec 3<>"/dev/tcp/127.0.0.1/${port}"
+  printf 'GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n' >&3
+  exec 3<&-
+  exec 3>&-
+) 2>/dev/null || true
+check "server alive after client abort" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+check "server still up after abort" bash -c "kill -0 \"$pid\""
 
 if [[ "$fail" -ne 0 ]]; then
     echo "Integration tests failed. Server log:"
@@ -236,4 +279,4 @@ if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi
 
-echo "All Stage 2–5 integration checks passed."
+echo "All Stage 2–6 integration checks passed."
