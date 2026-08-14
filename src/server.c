@@ -12,6 +12,7 @@
 
 #include "connection_queue.h"
 #include "logger.h"
+#include "server_stats.h"
 #include "thread_pool.h"
 
 /*
@@ -111,17 +112,26 @@ int server_run(const server_config_t *config, int listen_fd) {
         return -1;
     }
 
+    server_stats_t stats;
+    if (server_stats_init(&stats) != 0) {
+        fprintf(stderr, "cinderhttp: failed to initialize server stats\n");
+        logger_destroy();
+        return -1;
+    }
+
     connection_queue_t queue;
     if (connection_queue_init(&queue, (size_t)config->queue_capacity) != 0) {
         fprintf(stderr, "cinderhttp: failed to initialize connection queue\n");
+        server_stats_destroy(&stats);
         logger_destroy();
         return -1;
     }
 
     thread_pool_t pool;
-    if (thread_pool_init(&pool, (size_t)config->worker_count, &queue, config) != 0) {
+    if (thread_pool_init(&pool, (size_t)config->worker_count, &queue, config, &stats) != 0) {
         fprintf(stderr, "cinderhttp: failed to initialize thread pool\n");
         connection_queue_destroy(&queue);
+        server_stats_destroy(&stats);
         logger_destroy();
         return -1;
     }
@@ -130,6 +140,7 @@ int server_run(const server_config_t *config, int listen_fd) {
         fprintf(stderr, "cinderhttp: failed to start worker threads\n");
         thread_pool_destroy(&pool);
         connection_queue_destroy(&queue);
+        server_stats_destroy(&stats);
         logger_destroy();
         return -1;
     }
@@ -152,6 +163,7 @@ int server_run(const server_config_t *config, int listen_fd) {
             continue;
         }
 
+        server_stats_connection_accepted(&stats);
         log_connection_if_verbose(config, &client_addr);
 
         /*
@@ -168,6 +180,9 @@ int server_run(const server_config_t *config, int listen_fd) {
             logger_log("cinderhttp: failed to enqueue client connection");
             continue;
         }
+
+        /* Fd is in the worker subsystem (queued or soon handled). */
+        server_stats_connection_started(&stats);
     }
 
     /* Wake blocked producers/consumers; workers drain remaining fds. */
@@ -175,6 +190,7 @@ int server_run(const server_config_t *config, int listen_fd) {
     thread_pool_join(&pool);
     thread_pool_destroy(&pool);
     connection_queue_destroy(&queue);
+    server_stats_destroy(&stats);
     logger_destroy();
     return 0;
 }

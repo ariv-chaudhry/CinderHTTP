@@ -1,6 +1,6 @@
 # Memory Model
 
-Ownership rules through Stage 4. Every allocation and socket has a clear owner
+Ownership rules through Stage 5. Every allocation and socket has a clear owner
 and a matching release path.
 
 ## Queue lifecycle
@@ -36,10 +36,11 @@ fails cleanly.
 Destruction order (required):
 
 ```text
-shutdown queue → join workers → destroy pool handles → destroy queue
+shutdown queue → join workers → destroy pool handles → destroy queue → destroy stats
 ```
 
 Never destroy the queue mutex/condvars while a worker might still wait on them.
+Never destroy `server_stats_t` until workers are joined.
 
 ## Socket / file-descriptor ownership
 
@@ -122,6 +123,37 @@ generated HTML error body is allocated instead.
 be used from signal handlers. Workers may call it concurrently; lines do not
 interleave.
 
+## Server statistics
+
+```text
+server_run owns server_stats_t
+workers borrow pointer
+router borrows pointer
+stats snapshot is a value copy
+stats destroyed only after workers join
+```
+
+The stats mutex is held only while updating or copying counters — never while
+formatting JSON or sending responses.
+
+## Echo request / response bodies
+
+```text
+http_request_t owns request body
+router reads request body (body_length)
+response receives its own copy via http_response_set_body_copy()
+http_request_destroy frees original
+http_response_destroy frees response copy
+```
+
+The echo response never borrows request-owned memory.
+
+## Router path matching
+
+Route matching compares against `request->target` without mutating it and
+without allocating a separate path string: the query portion is skipped by
+stopping at `?`.
+
 ## Configuration
 
 - `server_config_t` is a stack object in `main()` with no dynamic allocations.
@@ -134,4 +166,4 @@ interleave.
 Path validation uses `realpath`/`stat` then later `fopen`. A race between
 those calls is possible on a shared filesystem. This educational server does
 not claim production-grade sandboxing; descriptor-based hardening can be
-explored later without changing the Stage 4 API shape.
+explored later without changing the Stage 5 API shape.

@@ -143,7 +143,7 @@ help:
 	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
 	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
 	@echo "  make test        - build and run unit tests"
-	@echo "  make integration - run curl-based Stage 2–4 integration checks"
+	@echo "  make integration - run curl-based Stage 2–5 integration checks"
 	@echo "  make run         - build and run the server with default config"
 	@echo "  make format      - format sources with clang-format, if installed"
 	@echo "  make clean       - remove build/ and bin/"

@@ -24,15 +24,15 @@ static void *worker_main(void *arg) {
             break;
         }
         /* Queue mutex is not held across request processing. */
-        client_handle(pool->config, client_fd, worker_id);
+        client_handle(pool->config, pool->stats, client_fd, worker_id);
     }
 
     return NULL;
 }
 
 int thread_pool_init(thread_pool_t *pool, size_t worker_count, connection_queue_t *queue,
-                     const server_config_t *config) {
-    if (pool == NULL || worker_count == 0 || queue == NULL || config == NULL) {
+                     const server_config_t *config, server_stats_t *stats) {
+    if (pool == NULL || worker_count == 0 || queue == NULL || config == NULL || stats == NULL) {
         return -1;
     }
 
@@ -46,6 +46,7 @@ int thread_pool_init(thread_pool_t *pool, size_t worker_count, connection_queue_
     pool->started_count = 0;
     pool->queue = queue;
     pool->config = config;
+    pool->stats = stats;
     return 0;
 }
 
@@ -108,4 +109,5 @@ void thread_pool_destroy(thread_pool_t *pool) {
     pool->worker_count = 0;
     pool->queue = NULL;
     pool->config = NULL;
+    pool->stats = NULL;
 }

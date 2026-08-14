@@ -7,7 +7,9 @@
  *   (accept thread pushes work)
  *   connection_queue_shutdown -> workers drain then exit
  *   thread_pool_join  -> wait for every worker
- *   thread_pool_destroy -> free thread array (does not destroy the queue)
+ *   thread_pool_destroy -> free thread array (does not destroy queue or stats)
+ *
+ * config, queue, and stats are borrowed (non-owning).
  */
 #ifndef CINDERHTTP_THREAD_POOL_H
 #define CINDERHTTP_THREAD_POOL_H
@@ -17,6 +19,7 @@
 
 #include "config.h"
 #include "connection_queue.h"
+#include "server_stats.h"
 
 typedef struct {
     pthread_t *threads;
@@ -25,12 +28,13 @@ typedef struct {
 
     connection_queue_t *queue;
     const server_config_t *config;
+    server_stats_t *stats;
 } thread_pool_t;
 
 /* Allocates thread handle storage. Does not create threads yet.
  * Returns 0 on success, -1 on failure. */
 int thread_pool_init(thread_pool_t *pool, size_t worker_count, connection_queue_t *queue,
-                     const server_config_t *config);
+                     const server_config_t *config, server_stats_t *stats);
 
 /*
  * Creates worker_count joinable threads. On partial failure, shuts down the
@@ -41,7 +45,7 @@ int thread_pool_start(thread_pool_t *pool);
 /* Joins every successfully created worker. */
 void thread_pool_join(thread_pool_t *pool);
 
-/* Frees thread handle storage. Call after join. Does not destroy the queue. */
+/* Frees thread handle storage. Call after join. Does not destroy queue/stats. */
 void thread_pool_destroy(thread_pool_t *pool);
 
 #endif /* CINDERHTTP_THREAD_POOL_H */

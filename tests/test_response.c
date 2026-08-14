@@ -152,12 +152,45 @@ static void test_does_not_duplicate_manual_headers(void) {
     http_response_destroy(&response);
 }
 
+static void test_build_json_and_body_copy(void) {
+    http_response_t response;
+    http_response_init(&response);
+    ASSERT_EQ(http_response_build_json(&response, 200, "{\"status\":\"ok\"}"), 0);
+    ASSERT_EQ(response.status_code, 200);
+    ASSERT_EQ(response.body_length, strlen("{\"status\":\"ok\"}"));
+    ASSERT_TRUE(memcmp(response.body, "{\"status\":\"ok\"}", response.body_length) == 0);
+
+    int found_ct = 0;
+    for (size_t i = 0; i < response.header_count; i++) {
+        if (strcmp(response.headers[i].name, "Content-Type") == 0) {
+            ASSERT_STR_EQ(response.headers[i].value, "application/json");
+            found_ct = 1;
+        }
+    }
+    ASSERT_TRUE(found_ct);
+    http_response_destroy(&response);
+
+    unsigned char bytes[] = {0x41, 0x00, 0x42, 0xFF};
+    http_response_init(&response);
+    ASSERT_EQ(http_response_set_body_copy(&response, bytes, 4), 0);
+    ASSERT_EQ(response.body_length, 4);
+    ASSERT_EQ(response.body[0], 0x41);
+    ASSERT_EQ(response.body[1], 0x00);
+    ASSERT_EQ(response.body[2], 0x42);
+    ASSERT_EQ(response.body[3], 0xFF);
+    ASSERT_EQ(http_response_set_body_copy(&response, NULL, 0), 0);
+    ASSERT_EQ(response.body_length, 0);
+    ASSERT_EQ(http_response_set_body_copy(&response, NULL, 3), -1);
+    http_response_destroy(&response);
+}
+
 int main(void) {
     test_reason_phrases();
     test_serialize_get_like();
     test_head_omits_body();
     test_content_length_matches_body();
     test_does_not_duplicate_manual_headers();
+    test_build_json_and_body_copy();
 
     printf("test_response: %d assertions passed, %d failed\n", g_passed, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Integration checks for Stages 2–4 against a live CinderHTTP process.
+# Integration checks for Stages 2–5 against a live CinderHTTP process.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +67,31 @@ check() {
     fi
 }
 
+# Body/haystack checks without nested bash -c (JSON quotes break that pattern).
+check_contains() {
+    local name="$1"
+    local haystack="$2"
+    local needle="$3"
+    if printf '%s' "$haystack" | grep -q -- "$needle"; then
+        echo "PASS: $name"
+    else
+        echo "FAIL: $name"
+        fail=1
+    fi
+}
+
+check_regex() {
+    local name="$1"
+    local haystack="$2"
+    local regex="$3"
+    if printf '%s' "$haystack" | grep -Eq -- "$regex"; then
+        echo "PASS: $name"
+    else
+        echo "FAIL: $name"
+        fail=1
+    fi
+}
+
 # --- Stage 3 baseline with Stage 4 concurrency defaults ---
 start_server --workers 4 --queue-size 16
 
@@ -92,7 +117,7 @@ check "custom 404 body" bash -c "printf '%s' \"$not_found_body\" | grep -q '404 
 check "traversal blocked" bash -c "curl -sS --path-as-is -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/../../outside.txt\" | grep -qx 403"
 check "encoded traversal blocked" bash -c "curl -sS --path-as-is -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/%2e%2e/etc/passwd\" | grep -qx 403"
 
-check "POST still works" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X POST --data hello \"http://127.0.0.1:${port}/test\" | grep -qx 200"
+check "POST /test is 405" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X POST --data hello \"http://127.0.0.1:${port}/test\" | grep -qx 405"
 check "DELETE still 405" bash -c "curl -sS -o /dev/null -w '%{http_code}' -X DELETE \"http://127.0.0.1:${port}/\" | grep -qx 405"
 
 if command -v nc >/dev/null 2>&1; then
@@ -101,6 +126,54 @@ if command -v nc >/dev/null 2>&1; then
 else
     echo "SKIP: nc not available for malformed-request check"
 fi
+
+# --- Stage 5 API endpoints ---
+health="$(curl -sS "http://127.0.0.1:${port}/api/health")"
+check "GET /api/health 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/api/health\" | grep -qx 200"
+check_contains "GET /api/health JSON body" "$health" '"status":"ok"'
+health_ctype="$(curl -sS -D - -o /dev/null "http://127.0.0.1:${port}/api/health" | tr -d '\r' | grep -i '^Content-Type:' || true)"
+check_contains "GET /api/health Content-Type" "$health_ctype" "application/json"
+check "GET /api/health?query" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/api/health?test=1\" | grep -qx 200"
+
+health_head_dl="$(curl -sS -o /dev/null -w '%{size_download}' --head "http://127.0.0.1:${port}/api/health")"
+check "HEAD /api/health no body" bash -c "test \"$health_head_dl\" = 0"
+
+echo_body="$(curl -sS -X POST -H 'Content-Type: text/plain' --data-binary 'hello cinder' "http://127.0.0.1:${port}/api/echo")"
+check "POST /api/echo body" bash -c "test \"$echo_body\" = 'hello cinder'"
+echo_ctype="$(curl -sS -D - -o /dev/null -X POST -H 'Content-Type: text/plain' --data-binary 'hello cinder' "http://127.0.0.1:${port}/api/echo" | tr -d '\r' | grep -i '^Content-Type:' || true)"
+check_contains "POST /api/echo Content-Type" "$echo_ctype" "text/plain"
+
+json_echo="$(curl -sS -X POST -H 'Content-Type: application/json' --data-binary '{"message":"hello"}' "http://127.0.0.1:${port}/api/echo")"
+check "POST /api/echo JSON bytes" test "$json_echo" = '{"message":"hello"}'
+json_echo_ct="$(curl -sS -D - -o /dev/null -X POST -H 'Content-Type: application/json' --data-binary '{"message":"hello"}' "http://127.0.0.1:${port}/api/echo" | tr -d '\r' | grep -i '^Content-Type:' || true)"
+check_contains "POST /api/echo JSON Content-Type" "$json_echo_ct" "application/json"
+
+echo_get_headers="$(curl -sS -D - -o /dev/null "http://127.0.0.1:${port}/api/echo" | tr -d '\r')"
+check_contains "GET /api/echo 405" "$echo_get_headers" "405"
+check_contains "GET /api/echo Allow POST" "$(printf '%s\n' "$echo_get_headers" | grep -i '^Allow:' || true)" "POST"
+
+check "GET /api/does-not-exist 404" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/api/does-not-exist\" | grep -qx 404"
+api_404="$(curl -sS "http://127.0.0.1:${port}/api/does-not-exist")"
+check_contains "API 404 is JSON" "$api_404" "not found"
+
+stats_json="$(curl -sS "http://127.0.0.1:${port}/api/stats")"
+check "GET /api/stats 200" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/api/stats\" | grep -qx 200"
+check_contains "stats has connections_accepted" "$stats_json" "connections_accepted"
+check_contains "stats has requests_total" "$stats_json" "requests_total"
+check_contains "stats has responses_2xx" "$stats_json" "responses_2xx"
+check_contains "stats has responses_4xx" "$stats_json" "responses_4xx"
+check_contains "stats has responses_5xx" "$stats_json" "responses_5xx"
+check_contains "stats has active_connections" "$stats_json" "active_connections"
+check_regex "stats requests_total nonzero" "$stats_json" '"requests_total":[1-9][0-9]*'
+
+stats_head_dl="$(curl -sS -o /dev/null -w '%{size_download}' --head "http://127.0.0.1:${port}/api/stats")"
+check "HEAD /api/stats no body" bash -c "test \"$stats_head_dl\" = 0"
+
+# Concurrent health + stats counter growth
+seq 1 40 | xargs -P 8 -I{} curl -fsS "http://127.0.0.1:${port}/api/health" >/dev/null
+stats_after="$(curl -sS "http://127.0.0.1:${port}/api/stats")"
+check_regex "concurrent health then stats alive" "$stats_after" '"requests_total":[1-9][0-9]*'
+check "static homepage still works" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
 
 # Concurrent requests against the 4-worker pool.
 tmp_codes="$(mktemp)"
@@ -126,6 +199,7 @@ check "startup shows queue=16" bash -c "grep -q 'queue=16' \"$log\""
 # --- Single worker mode ---
 start_server --workers 1 --queue-size 16
 check "workers=1 GET /" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/\" | grep -qx 200"
+check "workers=1 /api/health" bash -c "curl -sS -o /dev/null -w '%{http_code}' \"http://127.0.0.1:${port}/api/health\" | grep -qx 200"
 check "workers=1 startup banner" bash -c "grep -q 'workers=1' \"$log\""
 
 # --- Small queue backpressure ---
@@ -139,7 +213,7 @@ rm -f "$tmp_small"
 
 # --- Shutdown under concurrency ---
 start_server --workers 4 --queue-size 8
-seq 1 30 | xargs -P 10 -I{} curl -sS -o /dev/null "http://127.0.0.1:${port}/" >/dev/null 2>&1 &
+seq 1 30 | xargs -P 10 -I{} curl -sS -o /dev/null "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1 &
 load_pid=$!
 sleep 0.2
 kill -INT "$pid"
@@ -162,4 +236,4 @@ if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi
 
-echo "All Stage 2–4 integration checks passed."
+echo "All Stage 2–5 integration checks passed."

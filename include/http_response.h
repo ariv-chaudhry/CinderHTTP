@@ -41,11 +41,26 @@ int http_response_set_body_owned(http_response_t *response, unsigned char *body,
 int http_response_set_body_text(http_response_t *response, const char *text);
 
 /*
+ * Binary-safe copy of `length` bytes into a newly owned body buffer.
+ * length == 0 clears the body (body may be NULL). Rejects body == NULL with
+ * length > 0. Preserves embedded zero bytes. Returns 0 on success, -1 on error.
+ */
+int http_response_set_body_copy(http_response_t *response, const unsigned char *body,
+                                size_t length);
+
+/*
  * Builds a simple text/plain response with status, optional body, and the
  * standard Server / Connection / Content-Type / Content-Length headers.
  * Returns 0 on success, -1 on OOM.
  */
 int http_response_build_text(http_response_t *response, int status_code, const char *body_text);
+
+/*
+ * Builds an application/json response. `json` is copied as the body (may be
+ * empty). Content-Length is derived from the body; Server/Connection are added
+ * at serialize time. Returns 0 on success, -1 on OOM.
+ */
+int http_response_build_json(http_response_t *response, int status_code, const char *json);
 
 /*
  * Serializes the response into a newly allocated buffer suitable for send().

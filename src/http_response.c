@@ -163,6 +163,26 @@ int http_response_set_body_text(http_response_t *response, const char *text) {
     return http_response_set_body_owned(response, copy, len);
 }
 
+int http_response_set_body_copy(http_response_t *response, const unsigned char *body,
+                                size_t length) {
+    if (response == NULL) {
+        return -1;
+    }
+    if (length == 0) {
+        return http_response_set_body_owned(response, NULL, 0);
+    }
+    if (body == NULL) {
+        return -1;
+    }
+
+    unsigned char *copy = malloc(length);
+    if (copy == NULL) {
+        return -1;
+    }
+    memcpy(copy, body, length);
+    return http_response_set_body_owned(response, copy, length);
+}
+
 static int response_has_header(const http_response_t *response, const char *name) {
     for (size_t i = 0; i < response->header_count; i++) {
         if (header_name_equal(response->headers[i].name, name)) {
@@ -188,6 +208,27 @@ int http_response_build_text(http_response_t *response, int status_code, const c
     }
 
     if (http_response_add_header(response, "Content-Type", "text/plain; charset=utf-8") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int http_response_build_json(http_response_t *response, int status_code, const char *json) {
+    if (response == NULL) {
+        return -1;
+    }
+
+    http_response_destroy(response);
+    http_response_init(response);
+    http_response_set_status(response, status_code);
+
+    if (json != NULL) {
+        if (http_response_set_body_text(response, json) != 0) {
+            return -1;
+        }
+    }
+
+    if (http_response_add_header(response, "Content-Type", "application/json") != 0) {
         return -1;
     }
     return 0;

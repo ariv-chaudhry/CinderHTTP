@@ -4,8 +4,8 @@ CinderHTTP is being built in controlled stages rather than all at once.
 Checkboxes are only marked complete once the corresponding behavior has
 actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 4 complete** - bounded connection queue, fixed worker
-pool, thread-safe logging, concurrent request handling with graceful shutdown.
+Current status: **Stage 5 complete** - application router, `/api/health`,
+`/api/echo`, `/api/stats`, and thread-safe runtime statistics.
 
 ## Phase 1 - TCP Core
 
@@ -51,10 +51,10 @@ pool, thread-safe logging, concurrent request handling with graceful shutdown.
 
 ## Phase 5 - Application Layer
 
-- [ ] Router (method + path -> handler)
-- [ ] `/api/health`
-- [ ] `/api/echo`
-- [ ] `/api/stats`
+- [x] Router (method + path -> handler)
+- [x] `/api/health`
+- [x] `/api/echo`
+- [x] `/api/stats`
 
 ## Phase 6 - Reliability
 
@@ -62,7 +62,7 @@ pool, thread-safe logging, concurrent request handling with graceful shutdown.
       destroy synchronization primitives, free all allocations)
 - [ ] Malformed-request handling audit
 - [ ] Memory cleanup audit
-- [ ] AddressSanitizer / UndefinedBehaviorSanitizer clean run — *Stage 2–4
+- [ ] AddressSanitizer / UndefinedBehaviorSanitizer clean run — *Stage 2–5
       unit tests were run under ASan/UBSan; broader process audit remains*
 - [ ] Valgrind clean run
 
@@ -70,10 +70,10 @@ pool, thread-safe logging, concurrent request handling with graceful shutdown.
 
 - [x] Parser tests
 - [x] Queue tests
-- [ ] Router tests
+- [x] Router tests
 - [x] Security tests (path traversal, encoded traversal, symlink escape,
       malformed percent-encoding, embedded NUL)
-- [x] Integration tests (curl/nc; Stage 2–4 concurrency subset)
+- [x] Integration tests (curl/nc; Stage 2–5 concurrency + API subset)
 
 ## Phase 8 - Performance
 
@@ -83,20 +83,16 @@ pool, thread-safe logging, concurrent request handling with graceful shutdown.
 
 ---
 
-### Notes on Stage 4
+### Notes on Stage 5
 
-- Accept thread no longer processes HTTP; workers run `client_handle()`.
-- `--workers` and `--queue-size` are live and control pool size / queue
-  capacity.
-- A full queue blocks `push()` (backpressure). Shutdown uses timed waits in
-  `push()` plus the signal `sig_atomic_t` flag so a blocked producer cannot
-  deadlock the process.
-- Static files are still buffered in memory up to `HTTP_MAX_STATIC_FILE_SIZE`
-  (16 MiB). `sendfile()` / streaming is future work.
-- Directory access without `index.html` returns **403 Forbidden** (no
-  directory listings).
-- Percent-decoding is performed **once**; `%252e` is not recursively decoded.
-- TOCTOU between `realpath`/`stat` and `fopen` is acknowledged as an
-  educational-server limitation, not production sandboxing.
-- Phase 6 still tracks a fuller reliability/audit pass even though Stage 4
-  already drains the queue and joins workers on SIGINT/SIGTERM.
+- `/api/` is an application-owned namespace and never falls through to static
+  files (even if a matching path exists under `--root`).
+- Route matching uses exact path equality after stripping the query string;
+  trailing slashes are significant (`/api/health/` ≠ `/api/health`).
+- Wrong methods on known API paths return **405** with an `Allow` header;
+  unknown API paths return JSON **404**.
+- Temporary Stage 2 “POST always succeeds” behavior is removed; non-API POST
+  returns **405**.
+- Stats counters are mutex-protected; snapshots are copied before JSON is
+  formatted so the lock is not held during I/O.
+- Phase 6 still tracks a fuller reliability/audit pass.

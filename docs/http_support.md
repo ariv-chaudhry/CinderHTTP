@@ -1,34 +1,71 @@
 # HTTP Support
 
-This document describes what CinderHTTP implements today (Stage 4) and what is
-intentionally out of scope. Concurrency schedules requests; HTTP semantics
-match Stage 3.
+This document describes what CinderHTTP implements today (Stage 5) and what is
+intentionally out of scope.
 
 ## Supported
 
 - HTTP/1.0 and HTTP/1.1 request parsing
-- Methods: `GET`, `HEAD`, `POST` (POST still uses Stage 2 temporary text
-  handling — not routed to the filesystem)
+- Methods: `GET`, `HEAD`, `POST`
 - Origin-form request targets (including query strings), parsed and preserved
 - Header parsing with case-insensitive lookup
 - Request bodies via `Content-Length`
 - Binary-safe bodies (length-based)
 - One HTTP request per TCP connection (`Connection: close`)
+- Multithreaded accept → bounded queue → fixed worker pool
+- Application router for the reserved `/api/` namespace
 - Static file `GET` / `HEAD` from a configurable document root (`--root`)
 - MIME type detection from file extension
 - Custom `404.html` when present under the document root
 - Query-string stripping for filesystem lookup (`/index.html?x=1` → `index.html`)
 - Correct `HEAD` behavior (same `Content-Length` as GET, zero body bytes)
 
+### Application routes
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `GET` / `HEAD` | `/api/health` | `{"status":"ok"}` (`application/json`) |
+| `POST` | `/api/echo` | Echo request body bytes (binary-safe) |
+| `GET` / `HEAD` | `/api/stats` | JSON runtime counters |
+
+Routing notes:
+
+- Query strings do not affect matching (`/api/health?x=1` → health).
+- Exact paths only (`/api/health/` is **not** `/api/health`).
+- `/api/` never falls through to static files.
+- Wrong method on a known API path → **405** with route-specific `Allow`.
+- Unknown `/api/*` → JSON **404** (`{"error":"not found"}`).
+- Non-API `POST` (e.g. `POST /`) → **405** (no temporary success body).
+
+### `/api/echo` details
+
+- Body length uses `request->body_length` (never `strlen`).
+- Copies request `Content-Type` when present; otherwise
+  `application/octet-stream`.
+- Empty body (`Content-Length: 0`) returns `200` with `Content-Length: 0`.
+
+### `/api/stats` counters
+
+| Field | Meaning |
+|-------|---------|
+| `connections_accepted` | Successful `accept()` count |
+| `active_connections` | Enqueued/in-flight connections (started after successful queue push; finished when `client_handle` ends) |
+| `requests_total` | Incremented after a complete framed message is read (`HTTP_READ_OK`), before/despite parse errors |
+| `responses_2xx` / `4xx` / `5xx` | Incremented once per successfully sent HTTP response |
+
+`/api/stats` itself increments `requests_total` when read; its own `2xx` count
+is updated only after that response is sent (so the returned snapshot may not
+include its own response class yet).
+
 ### Status codes in use
 
 | Code | Meaning |
 |------|---------|
-| 200 | Successful static file or temporary POST response |
+| 200 | Successful static file or API response |
 | 400 | Malformed HTTP or malformed percent-encoding / path |
 | 403 | Path traversal, symlink escape, or directory without index |
-| 404 | Safe path that does not resolve to a regular file |
-| 405 | Unsupported method (e.g. `DELETE`) |
+| 404 | Static miss or unknown `/api/*` route |
+| 405 | Unsupported method (static or API) |
 | 413 | Oversized request body or oversized static file |
 | 501 | `Transfer-Encoding` (including chunked) |
 | 505 | Unsupported HTTP version |
@@ -57,8 +94,6 @@ match Stage 3.
 
 ## Not supported
 
-- Multithreading / connection queue / worker pool
-- General application router and `/api/*` endpoints
 - Keep-alive / pipelining
 - Chunked transfer encoding
 - TLS / HTTPS
@@ -66,6 +101,7 @@ match Stage 3.
 - Directory listings
 - Range requests / ETag / compression
 - `sendfile()` zero-copy
+- Query-string key/value parsing beyond path extraction
 
 ## Architecture note
 
@@ -73,11 +109,11 @@ match Stage 3.
 HTTP parser          (syntax only — no filesystem)
        │
        ▼
-Request handler
+client_handle
        │
-       ├── POST → temporary text response
+       ├── /api/* → router (health / echo / stats)
        │
-       └── GET/HEAD → static resolver
+       └── other → GET/HEAD static resolver
               ├── URL decode (one pass)
               ├── lexical normalize
               ├── realpath + root confinement
