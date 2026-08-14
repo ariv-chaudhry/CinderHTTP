@@ -4,9 +4,9 @@ CinderHTTP is being built in controlled stages rather than all at once.
 Checkboxes are only marked complete once the corresponding behavior has
 actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 6 complete** - graceful queue-draining shutdown,
-partial-init cleanup, SIGPIPE isolation, send-all hardening, ownership audit,
-sanitizer-verified reliability tests.
+Current status: **Stage 7 complete** - deliberate adversarial regression coverage
+for framing, malformed input, deterministic parser fuzzing, live raw-socket
+clients, concurrency stress, and sanitizer-backed suites.
 
 ## Phase 1 - TCP Core
 
@@ -72,10 +72,14 @@ sanitizer-verified reliability tests.
 - [x] Parser tests
 - [x] Queue tests
 - [x] Router tests
-- [x] Security tests (path traversal, encoded traversal, symlink escape,
-      malformed percent-encoding, embedded NUL)
-- [x] Integration tests (curl; Stage 2–6 concurrency + API + shutdown)
-- [ ] Broader regression / fuzz-style hardening beyond Stage 6 coverage
+- [x] Security tests
+- [x] Integration tests
+- [x] HTTP reader/framing tests
+- [x] Boundary-value regression tests
+- [x] Deterministic parser fuzz-style testing
+- [x] Malformed live-request testing
+- [x] Concurrent malformed-client survival testing
+- [x] Sanitizer-backed regression suite
 
 ## Phase 8 - Performance
 
@@ -85,11 +89,11 @@ sanitizer-verified reliability tests.
 
 ---
 
-### Notes on Stage 6
+### Notes on Stage 7
 
-- Already-queued connections are drained before workers exit.
-- Signal handlers only set `sig_atomic_t` (plus `SIGPIPE` → `SIG_IGN`).
-- Partial initialization reverses only successfully created subsystems.
-- `send_all()` retries partial writes; MSG_NOSIGNAL + SIG_IGN prevent
-  process death on client disconnect.
-- Stage 7 remains a broader testing pass before Stage 8 performance work.
+- Framing is tested via `socketpair()` fragmentation and CRLFCRLF splits.
+- Duplicate `Content-Length` (identical or conflicting) is rejected.
+- Extra bytes after a declared body are rejected (no pipelining).
+- Embedded NUL bytes are rejected in protocol metadata; bodies may still be binary.
+- No client read-timeout subsystem yet (documented limitation).
+- See [`docs/testing.md`](testing.md) for commands and fuzz details.

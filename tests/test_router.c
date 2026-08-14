@@ -100,8 +100,62 @@ static void test_health_head_and_query(void) {
     ASSERT_EQ(response.status_code, 200);
     ASSERT_EQ(response.body_length, strlen("{\"status\":\"ok\"}"));
 
+    unsigned char *wire = NULL;
+    size_t wire_len = 0;
+    ASSERT_EQ(http_response_serialize(&response, 1 /* omit body */, &wire, &wire_len), 0);
+    char expected_cl[64];
+    snprintf(expected_cl, sizeof(expected_cl), "Content-Length: %zu\r\n", response.body_length);
+    ASSERT_TRUE(strstr((char *)wire, expected_cl) != NULL);
+    const char *sep = strstr((char *)wire, "\r\n\r\n");
+    ASSERT_TRUE(sep != NULL);
+    ASSERT_EQ(wire_len, (size_t)(sep + 4 - (char *)wire));
+    free(wire);
+
     http_response_destroy(&response);
     http_request_destroy(&request);
+    server_stats_destroy(&stats);
+}
+
+static void test_method_path_matrix(void) {
+    server_stats_t stats;
+    ASSERT_EQ(server_stats_init(&stats), 0);
+    router_context_t ctx = {.config = NULL, .stats = &stats};
+
+    struct {
+        const char *raw;
+        int status;
+        const char *allow_needle; /* NULL if Allow not required */
+    } cases[] = {
+        {"GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n", 200, NULL},
+        {"HEAD /api/health HTTP/1.1\r\nHost: x\r\n\r\n", 200, NULL},
+        {"POST /api/health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", 405, "GET"},
+        {"GET /api/echo HTTP/1.1\r\nHost: x\r\n\r\n", 405, "POST"},
+        {"HEAD /api/echo HTTP/1.1\r\nHost: x\r\n\r\n", 405, "POST"},
+        {"POST /api/echo HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", 200, NULL},
+        {"GET /api/stats HTTP/1.1\r\nHost: x\r\n\r\n", 200, NULL},
+        {"HEAD /api/stats HTTP/1.1\r\nHost: x\r\n\r\n", 200, NULL},
+        {"POST /api/stats HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", 405, "GET"},
+        {"GET /api/unknown HTTP/1.1\r\nHost: x\r\n\r\n", 404, NULL},
+        {"POST /api/unknown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", 404, NULL},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        http_request_t request;
+        http_response_t response;
+        http_request_init(&request);
+        http_response_init(&response);
+        ASSERT_TRUE(parse_message(cases[i].raw, strlen(cases[i].raw), &request));
+        ASSERT_EQ(router_dispatch(&ctx, &request, &response), ROUTER_HANDLED);
+        ASSERT_EQ(response.status_code, cases[i].status);
+        if (cases[i].allow_needle != NULL) {
+            const char *allow = response_header(&response, "Allow");
+            ASSERT_TRUE(allow != NULL);
+            ASSERT_TRUE(strstr(allow, cases[i].allow_needle) != NULL);
+        }
+        http_response_destroy(&response);
+        http_request_destroy(&request);
+    }
+
     server_stats_destroy(&stats);
 }
 
@@ -293,6 +347,7 @@ int main(void) {
     test_echo_binary_and_empty();
     test_echo_wrong_method();
     test_stats_and_unknown();
+    test_method_path_matrix();
 
     printf("test_router: %d assertions passed, %d failed\n", g_passed, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -272,6 +272,9 @@ static http_parse_result_t parse_request_line(const char *line, size_t line_len,
     }
 
     size_t method_len = (size_t)(first_sp - line);
+    if (memchr(line, '\0', method_len) != NULL) {
+        return HTTP_PARSE_BAD_REQUEST;
+    }
     char *method = dup_range(line, method_len);
     if (method == NULL) {
         return HTTP_PARSE_OUT_OF_MEMORY;
@@ -299,6 +302,11 @@ static http_parse_result_t parse_request_line(const char *line, size_t line_len,
     const char *version_start = second_sp + 1;
     size_t version_len = line_len - method_len - 1 - target_len - 1;
     if (version_len == 0 || memchr(version_start, ' ', version_len) != NULL) {
+        free(method);
+        return HTTP_PARSE_BAD_REQUEST;
+    }
+    if (memchr(after_method, '\0', target_len) != NULL ||
+        memchr(version_start, '\0', version_len) != NULL) {
         free(method);
         return HTTP_PARSE_BAD_REQUEST;
     }
@@ -377,7 +385,7 @@ static http_parse_result_t parse_header_line(const char *line, size_t line_len,
     /* Header names must be non-empty and must not contain spaces. */
     size_t name_len = (size_t)(colon - line);
     for (size_t i = 0; i < name_len; i++) {
-        if (line[i] == ' ' || line[i] == '\t') {
+        if (line[i] == ' ' || line[i] == '\t' || line[i] == '\0') {
             return HTTP_PARSE_BAD_REQUEST;
         }
     }
@@ -389,7 +397,12 @@ static http_parse_result_t parse_header_line(const char *line, size_t line_len,
 
     const char *value_start = skip_ows(colon + 1, line + line_len);
     const char *value_end = trim_ows_end(value_start, line + line_len);
-    char *value = dup_range(value_start, (size_t)(value_end - value_start));
+    size_t value_len = (size_t)(value_end - value_start);
+    if (memchr(value_start, '\0', value_len) != NULL) {
+        free(name);
+        return HTTP_PARSE_BAD_REQUEST;
+    }
+    char *value = dup_range(value_start, value_len);
     if (value == NULL) {
         free(name);
         return HTTP_PARSE_OUT_OF_MEMORY;

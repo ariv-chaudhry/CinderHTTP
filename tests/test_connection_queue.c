@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -317,6 +318,131 @@ static void test_drain_after_shutdown(void) {
     connection_queue_destroy(&q);
 }
 
+/* --- Multi-producer / multi-consumer stress (fake fds, fully drained) --- */
+
+enum { STRESS_ITEMS = 400, STRESS_PRODUCERS = 4, STRESS_CONSUMERS = 4, STRESS_BASE = 200000 };
+
+typedef struct {
+    connection_queue_t *queue;
+    int producer_id;
+    int per_producer;
+} stress_prod_args_t;
+
+typedef struct {
+    connection_queue_t *queue;
+    int *seen;
+    pthread_mutex_t *seen_mu;
+    int *consumed;
+} stress_cons_args_t;
+
+static void *stress_producer(void *arg) {
+    stress_prod_args_t *a = (stress_prod_args_t *)arg;
+    for (int i = 0; i < a->per_producer; i++) {
+        int value = STRESS_BASE + a->producer_id * a->per_producer + i;
+        connection_queue_status_t st = connection_queue_push(a->queue, value, NULL);
+        if (st != CONNECTION_QUEUE_OK) {
+            return (void *)(intptr_t)1;
+        }
+    }
+    return NULL;
+}
+
+static void *stress_consumer(void *arg) {
+    stress_cons_args_t *a = (stress_cons_args_t *)arg;
+    for (;;) {
+        int fd = -1;
+        connection_queue_status_t st = connection_queue_pop(a->queue, &fd);
+        if (st == CONNECTION_QUEUE_SHUTDOWN) {
+            return NULL;
+        }
+        if (st != CONNECTION_QUEUE_OK) {
+            return (void *)(intptr_t)1;
+        }
+        int idx = fd - STRESS_BASE;
+        if (idx < 0 || idx >= STRESS_ITEMS) {
+            return (void *)(intptr_t)1;
+        }
+        pthread_mutex_lock(a->seen_mu);
+        if (a->seen[idx] != 0) {
+            pthread_mutex_unlock(a->seen_mu);
+            return (void *)(intptr_t)1; /* duplicate */
+        }
+        a->seen[idx] = 1;
+        (*a->consumed)++;
+        pthread_mutex_unlock(a->seen_mu);
+    }
+}
+
+static void test_multi_producer_consumer_stress(void) {
+    connection_queue_t q;
+    expect_eq_int("stress init", connection_queue_init(&q, 32), 0);
+
+    int seen[STRESS_ITEMS];
+    memset(seen, 0, sizeof(seen));
+    pthread_mutex_t seen_mu = PTHREAD_MUTEX_INITIALIZER;
+    int consumed = 0;
+
+    pthread_t producers[STRESS_PRODUCERS];
+    pthread_t consumers[STRESS_CONSUMERS];
+    stress_prod_args_t pargs[STRESS_PRODUCERS];
+    stress_cons_args_t cargs[STRESS_CONSUMERS];
+
+    for (int i = 0; i < STRESS_CONSUMERS; i++) {
+        cargs[i].queue = &q;
+        cargs[i].seen = seen;
+        cargs[i].seen_mu = &seen_mu;
+        cargs[i].consumed = &consumed;
+        expect_eq_int("stress cons create", pthread_create(&consumers[i], NULL, stress_consumer, &cargs[i]),
+                      0);
+    }
+
+    int per = STRESS_ITEMS / STRESS_PRODUCERS;
+    for (int i = 0; i < STRESS_PRODUCERS; i++) {
+        pargs[i].queue = &q;
+        pargs[i].producer_id = i;
+        pargs[i].per_producer = per;
+        expect_eq_int("stress prod create", pthread_create(&producers[i], NULL, stress_producer, &pargs[i]),
+                      0);
+    }
+
+    for (int i = 0; i < STRESS_PRODUCERS; i++) {
+        void *ret = NULL;
+        expect_eq_int("stress prod join", pthread_join(producers[i], &ret), 0);
+        expect_eq_int("stress prod ok", ret == NULL ? 0 : 1, 0);
+    }
+
+    /* Wait until all items are observed, then shut down. */
+    for (;;) {
+        pthread_mutex_lock(&seen_mu);
+        int done = (consumed == STRESS_ITEMS);
+        pthread_mutex_unlock(&seen_mu);
+        if (done) {
+            break;
+        }
+        sleep_ms(1);
+    }
+
+    connection_queue_shutdown(&q);
+
+    for (int i = 0; i < STRESS_CONSUMERS; i++) {
+        void *ret = NULL;
+        expect_eq_int("stress cons join", pthread_join(consumers[i], &ret), 0);
+        expect_eq_int("stress cons ok", ret == NULL ? 0 : 1, 0);
+    }
+
+    expect_eq_int("stress consumed", consumed, STRESS_ITEMS);
+    int missing = 0;
+    for (int i = 0; i < STRESS_ITEMS; i++) {
+        if (!seen[i]) {
+            missing++;
+        }
+    }
+    expect_eq_int("stress no missing", missing, 0);
+
+    pthread_mutex_destroy(&seen_mu);
+    connection_queue_destroy(&q);
+}
+
 /* --- Abort flag unblocks full push (signal-safe shutdown path) --- */
 
 typedef struct {
@@ -361,6 +487,7 @@ int main(void) {
     test_shutdown_wakes_consumer();
     test_shutdown_wakes_producer();
     test_drain_after_shutdown();
+    test_multi_producer_consumer_stress();
     test_abort_flag_unblocks_push();
 
     if (g_failures != 0) {

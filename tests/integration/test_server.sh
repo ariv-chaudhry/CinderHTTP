@@ -273,10 +273,116 @@ start_server --workers 2 --queue-size 8
 check "server alive after client abort" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
 check "server still up after abort" bash -c "kill -0 \"$pid\""
 
+# --- Stage 7: raw malformed / fragmented clients ---
+raw_http="$script_dir/raw_http.py"
+if command -v python3 >/dev/null 2>&1; then
+    raw_status() {
+        local name="$1"
+        local expect="$2"
+        shift 2
+        local out
+        out="$(python3 "$raw_http" 127.0.0.1 "$port" --timeout 2 --half-close "$@" 2>/dev/null || true)"
+        local line
+        line="$(printf '%s' "$out" | head -n1 | tr -d '\r')"
+        if printf '%s' "$line" | grep -q "HTTP/1.1 ${expect}"; then
+            echo "PASS: $name"
+        else
+            echo "FAIL: $name (expected status ${expect}, got: ${line:-<empty>})"
+            fail=1
+        fi
+    }
+
+    raw_status "raw invalid version -> 505" 505 \
+        'GET / HTTP/2.0\r\nHost: localhost\r\n\r\n'
+    raw_status "raw unsupported method -> 405" 405 \
+        'PUT / HTTP/1.1\r\nHost: localhost\r\n\r\n'
+    raw_status "raw malformed request line -> 400" 400 \
+        'GET /\r\nHost: localhost\r\n\r\n'
+    raw_status "raw header without colon -> 400" 400 \
+        'GET / HTTP/1.1\r\nBadHeader\r\n\r\n'
+    raw_status "raw invalid Content-Length -> 400" 400 \
+        'POST /api/echo HTTP/1.1\r\nContent-Length: abc\r\n\r\n'
+    raw_status "raw duplicate Content-Length -> 400" 400 \
+        'POST /api/echo HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n'
+    raw_status "raw Transfer-Encoding chunked -> 501" 501 \
+        'POST /api/echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n'
+
+    # Truncated headers / body: server must stay alive (response optional).
+    python3 "$raw_http" 127.0.0.1 "$port" --timeout 1 --half-close \
+        'GET / HTTP/1.1\r\nHost:' >/dev/null 2>&1 || true
+    python3 "$raw_http" 127.0.0.1 "$port" --timeout 1 --half-close \
+        'POST /api/echo HTTP/1.1\r\nContent-Length: 100\r\n\r\nshort' >/dev/null 2>&1 || true
+    check "alive after truncated raw requests" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+
+    # Malformed burst then health.
+    for _ in $(seq 1 12); do
+        python3 "$raw_http" 127.0.0.1 "$port" --timeout 1 --half-close \
+            'GET / NotHTTP\r\n\r\n' >/dev/null 2>&1 || true
+        python3 "$raw_http" 127.0.0.1 "$port" --timeout 1 --half-close \
+            'POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n' >/dev/null 2>&1 || true
+    done
+    check "health after malformed sequence" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+
+    # Connect-and-drop without sending.
+    for _ in $(seq 1 8); do
+        python3 - "$port" <<'PY' >/dev/null 2>&1 || true
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1.0)
+s.close()
+PY
+    done
+    check "health after empty connects" bash -c "curl -fsS \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+
+    # Fragmented valid GET across pauses.
+    frag_out="$(python3 "$raw_http" 127.0.0.1 "$port" --timeout 3 --half-close --chunk-pause 0.05 \
+        --chunk 'GET /api/health' \
+        --chunk ' HTTP/1.1\r\nHost:' \
+        --chunk ' localhost\r\n\r\n' 2>/dev/null || true)"
+    check_contains "fragmented GET health status" "$(printf '%s' "$frag_out" | head -n1 | tr -d '\r')" "200"
+    check_contains "fragmented GET health body" "$frag_out" '"status":"ok"'
+
+    # Fragmented POST echo body.
+    echo_out="$(python3 "$raw_http" 127.0.0.1 "$port" --timeout 3 --half-close --chunk-pause 0.02 \
+        --chunk 'POST /api/echo HTTP/1.1\r\nContent-Length: 11\r\n\r\n' \
+        --chunk 'hello ' \
+        --chunk 'world' 2>/dev/null || true)"
+    echo_body="$(printf '%s' "$echo_out" | python3 -c 'import sys; d=sys.stdin.buffer.read(); i=d.find(b"\r\n\r\n"); sys.stdout.buffer.write(d[i+4:] if i>=0 else b"")')"
+    check "fragmented POST echo body" bash -c "test \"$echo_body\" = 'hello world'"
+
+    # Concurrent malformed burst (bounded parallelism; each client has a timeout).
+    python3 - "$port" <<'PY'
+import socket, sys, concurrent.futures
+port = int(sys.argv[1])
+payload = b"GET / HTTP/9.9\r\nHost: x\r\n\r\n"
+
+def one(_):
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+        s.settimeout(1.0)
+        try:
+            s.sendall(payload)
+            s.shutdown(socket.SHUT_WR)
+            while s.recv(4096):
+                pass
+        finally:
+            s.close()
+    except OSError:
+        pass
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+    list(ex.map(one, range(80)))
+PY
+    check "alive after malformed burst" bash -c "curl -fsS --max-time 2 \"http://127.0.0.1:${port}/api/health\" | grep -q status"
+    burst_stats="$(curl -sS --max-time 2 "http://127.0.0.1:${port}/api/stats")"
+    check_contains "stats after malformed burst" "$burst_stats" "requests_total"
+else
+    echo "SKIP: python3 not available for Stage 7 raw HTTP checks"
+fi
+
 if [[ "$fail" -ne 0 ]]; then
     echo "Integration tests failed. Server log:"
     cat "$log" || true
     exit 1
 fi
 
-echo "All Stage 2–6 integration checks passed."
+echo "All Stage 2–7 integration checks passed."

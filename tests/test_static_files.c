@@ -125,6 +125,9 @@ static int setup_fixture(void) {
         return -1;
     }
 
+    snprintf(path, sizeof(path), "%s/file..txt", g_root);
+    ASSERT_TRUE(write_file(path, "dots-ok", 7) == 0);
+
     snprintf(path, sizeof(path), "%s/secret.txt", g_outside);
     ASSERT_TRUE(write_file(path, "TOPSECRET", 9) == 0);
 
@@ -153,6 +156,8 @@ static void cleanup_fixture(void) {
     rmdir(path);
     snprintf(path, sizeof(path), "%s/empty_dir", g_root);
     rmdir(path);
+    snprintf(path, sizeof(path), "%s/file..txt", g_root);
+    unlink(path);
     snprintf(path, sizeof(path), "%s/link", g_root);
     unlink(path);
     rmdir(g_root);
@@ -364,6 +369,35 @@ static void test_symlink_escape(void) {
     unlink(linkpath);
 }
 
+static void test_dots_in_filename(void) {
+    http_response_t resp;
+    http_response_init(&resp);
+    http_request_t req = make_get("/file..txt");
+    ASSERT_EQ(static_files_serve(g_root, &req, &resp, 1), STATIC_FILE_OK);
+    ASSERT_EQ(resp.body_length, 7);
+    ASSERT_TRUE(memcmp(resp.body, "dots-ok", 7) == 0);
+    clear_borrowed(&req);
+    http_response_destroy(&resp);
+}
+
+static void test_symlink_dir_escape(void) {
+    char linkpath[640];
+    snprintf(linkpath, sizeof(linkpath), "%s/out_dir", g_root);
+    if (symlink(g_outside, linkpath) != 0) {
+        fprintf(stderr, "SKIP symlink dir test: %s\n", strerror(errno));
+        return;
+    }
+
+    http_response_t resp;
+    http_response_init(&resp);
+    http_request_t req = make_get("/out_dir/secret.txt");
+    static_file_result_t rc = static_files_serve(g_root, &req, &resp, 1);
+    ASSERT_EQ(rc, STATIC_FILE_FORBIDDEN);
+    clear_borrowed(&req);
+    http_response_destroy(&resp);
+    unlink(linkpath);
+}
+
 static void test_custom_404(void) {
     http_response_t resp;
     http_response_init(&resp);
@@ -387,6 +421,8 @@ int main(void) {
     test_missing_and_dir();
     test_traversal();
     test_symlink_escape();
+    test_dots_in_filename();
+    test_symlink_dir_escape();
     test_custom_404();
 
     cleanup_fixture();

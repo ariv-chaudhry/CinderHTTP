@@ -1,6 +1,6 @@
 # HTTP Support
 
-This document describes what CinderHTTP implements today (Stage 5) and what is
+This document describes what CinderHTTP implements today (Stage 7) and what is
 intentionally out of scope.
 
 ## Supported
@@ -10,7 +10,12 @@ intentionally out of scope.
 - Origin-form request targets (including query strings), parsed and preserved
 - Header parsing with case-insensitive lookup
 - Request bodies via `Content-Length`
-- Binary-safe bodies (length-based)
+- Binary-safe bodies (length-based); embedded NUL is allowed **in bodies only**
+- Protocol metadata (method, target, version, header names/values) rejects
+  embedded NUL bytes
+- Duplicate `Content-Length` headers are rejected (identical or conflicting)
+- Extra bytes after a complete `Content-Length` message are rejected (no
+  pipelining)
 - One HTTP request per TCP connection (`Connection: close`)
 - Multithreaded accept → bounded queue → fixed worker pool
 - Application router for the reserved `/api/` namespace

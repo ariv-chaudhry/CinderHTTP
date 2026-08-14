@@ -69,7 +69,7 @@ CFLAGS_MARKER := $(BUILD_DIR)/.cflags
 
 .DEFAULT_GOAL := all
 
-.PHONY: all debug test integration sanitize valgrind clean run format help FORCE
+.PHONY: all debug test integration sanitize valgrind fuzz coverage clean run format help FORCE
 
 all: $(TARGET)
 
@@ -136,6 +136,26 @@ test: $(TEST_BINS)
 sanitize: test
 	@echo "sanitize: ASan/UBSan unit tests completed"
 
+# Deterministic parser fuzz harness. Default iteration count is higher than the
+# modest count used inside `make test` (via the same binary's default when unset).
+FUZZ_BIN := $(BUILD_DIR)/tests/test_parser_fuzz
+fuzz: $(FUZZ_BIN)
+	@echo "== Running fuzz harness =="
+	@CINDERHTTP_FUZZ_ITERS=$${CINDERHTTP_FUZZ_ITERS:-50000} $(FUZZ_BIN)
+
+# Optional gcov coverage (does not require lcov/genhtml).
+coverage:
+	$(MAKE) clean
+	$(MAKE) test CFLAGS="$(COMMON_CFLAGS) -O0 -g --coverage" LDFLAGS="--coverage"
+	@echo "== Coverage summary (gcov) =="
+	@if ! command -v gcov >/dev/null 2>&1; then \
+		echo "gcov: not installed; coverage data (.gcda) was still generated under build/"; \
+		exit 0; \
+	fi; \
+	cd $(BUILD_DIR) && gcov -b -o . ../src/*.c 2>/dev/null | \
+		grep -E 'File |Lines executed|No executable' || true; \
+	echo "coverage: raw .gcov reports are under $(BUILD_DIR)/"
+
 # Optional: requires valgrind installed. Normal `make test` does not.
 valgrind: $(TEST_BINS)
 	@if ! command -v valgrind >/dev/null 2>&1; then \
@@ -168,8 +188,10 @@ help:
 	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
 	@echo "  make sanitize    - ASan/UBSan unit tests (convenience alias)"
 	@echo "  make test        - build and run unit tests"
+	@echo "  make fuzz        - deterministic parser fuzz (default 50000 iters)"
+	@echo "  make coverage    - rebuild unit tests with gcov and print summary"
 	@echo "  make valgrind    - run unit tests under Valgrind (if installed)"
-	@echo "  make integration - run curl-based Stage 2–6 integration checks"
+	@echo "  make integration - run live Stage 2–7 integration checks"
 	@echo "  make run         - build and run the server with default config"
 	@echo "  make format      - format sources with clang-format, if installed"
 	@echo "  make clean       - remove build/ and bin/"

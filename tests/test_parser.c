@@ -277,7 +277,23 @@ static void test_content_length_errors(void) {
               HTTP_PARSE_INVALID_CONTENT_LENGTH);
     http_request_destroy(&req);
 
+    ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\n", &req),
+              HTTP_PARSE_INVALID_CONTENT_LENGTH);
+    http_request_destroy(&req);
+
+    ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length: 5x\r\n\r\n", &req),
+              HTTP_PARSE_INVALID_CONTENT_LENGTH);
+    http_request_destroy(&req);
+
     ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length: 5hello\r\n\r\n", &req),
+              HTTP_PARSE_INVALID_CONTENT_LENGTH);
+    http_request_destroy(&req);
+
+    ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length:\r\n\r\n", &req),
+              HTTP_PARSE_INVALID_CONTENT_LENGTH);
+    http_request_destroy(&req);
+
+    ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length: \r\n\r\n", &req),
               HTTP_PARSE_INVALID_CONTENT_LENGTH);
     http_request_destroy(&req);
 
@@ -285,6 +301,118 @@ static void test_content_length_errors(void) {
                          "Content-Length: 99999999999999999999999999999\r\n\r\n",
                          &req),
               HTTP_PARSE_INVALID_CONTENT_LENGTH);
+    http_request_destroy(&req);
+}
+
+static void test_content_length_leading_zeros(void) {
+    http_request_t req;
+    http_request_init(&req);
+    ASSERT_EQ(parse_cstr("POST / HTTP/1.1\r\nContent-Length: 0005\r\n\r\nhello", &req),
+              HTTP_PARSE_OK);
+    ASSERT_EQ(req.body_length, 5);
+    ASSERT_TRUE(memcmp(req.body, "hello", 5) == 0);
+    http_request_destroy(&req);
+}
+
+static void test_content_length_and_transfer_encoding(void) {
+    http_request_t req;
+    http_request_init(&req);
+    const char *msg = "POST / HTTP/1.1\r\n"
+                      "Content-Length: 5\r\n"
+                      "Transfer-Encoding: chunked\r\n"
+                      "\r\n"
+                      "hello";
+    ASSERT_EQ(parse_cstr(msg, &req), HTTP_PARSE_UNSUPPORTED_TRANSFER_ENCODING);
+    http_request_destroy(&req);
+}
+
+static void test_nul_in_metadata(void) {
+    http_request_t req;
+    http_request_init(&req);
+
+    /* Embedded NUL in method. */
+    unsigned char bad_method[] = {'G', 'E', '\0', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P',
+                                  '/', '1', '.', '1', '\r', '\n', '\r', '\n'};
+    ASSERT_EQ(http_parse_request(bad_method, sizeof(bad_method), &req), HTTP_PARSE_BAD_REQUEST);
+    http_request_destroy(&req);
+
+    /* Embedded NUL in target. */
+    unsigned char bad_target[] = {'G', 'E', 'T', ' ', '/', 'a', '\0', 'b', ' ', 'H', 'T',
+                                  'T', 'P', '/', '1', '.', '1', '\r', '\n', '\r', '\n'};
+    ASSERT_EQ(http_parse_request(bad_target, sizeof(bad_target), &req), HTTP_PARSE_BAD_REQUEST);
+    http_request_destroy(&req);
+
+    /* Embedded NUL in header name. */
+    unsigned char bad_hname[] = {'G', 'E', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P', '/', '1',
+                                 '.', '1', '\r', '\n', 'H', 'o', '\0', 's', 't', ':', ' ',
+                                 'x', '\r', '\n', '\r', '\n'};
+    ASSERT_EQ(http_parse_request(bad_hname, sizeof(bad_hname), &req), HTTP_PARSE_BAD_REQUEST);
+    http_request_destroy(&req);
+
+    /* Embedded NUL in header value. */
+    unsigned char bad_hval[] = {'G', 'E', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P', '/', '1',
+                                '.', '1', '\r', '\n', 'H', 'o', 's', 't', ':', ' ', 'x',
+                                '\0', 'y', '\r', '\n', '\r', '\n'};
+    ASSERT_EQ(http_parse_request(bad_hval, sizeof(bad_hval), &req), HTTP_PARSE_BAD_REQUEST);
+    http_request_destroy(&req);
+}
+
+static void test_extra_body_bytes_rejected(void) {
+    http_request_t req;
+    http_request_init(&req);
+    /* Content-Length: 5 but trailing EXTRA after the declared body. */
+    const char *msg = "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloEXTRA";
+    ASSERT_EQ(parse_cstr(msg, &req), HTTP_PARSE_BAD_REQUEST);
+    http_request_destroy(&req);
+}
+
+static void test_body_size_boundaries(void) {
+    http_request_t req;
+    http_request_init(&req);
+
+    char hdr[96];
+    int n = snprintf(hdr, sizeof(hdr), "POST / HTTP/1.1\r\nContent-Length: %d\r\n\r\n",
+                     HTTP_MAX_BODY_SIZE - 1);
+    ASSERT_TRUE(n > 0);
+    size_t hdr_len = (size_t)n;
+    size_t body_len = (size_t)(HTTP_MAX_BODY_SIZE - 1);
+    unsigned char *msg = malloc(hdr_len + body_len);
+    ASSERT_TRUE(msg != NULL);
+    if (msg == NULL) {
+        return;
+    }
+    memcpy(msg, hdr, hdr_len);
+    memset(msg + hdr_len, 'a', body_len);
+    ASSERT_EQ(http_parse_request(msg, hdr_len + body_len, &req), HTTP_PARSE_OK);
+    ASSERT_EQ(req.body_length, body_len);
+    http_request_destroy(&req);
+    free(msg);
+
+    n = snprintf(hdr, sizeof(hdr), "POST / HTTP/1.1\r\nContent-Length: %d\r\n\r\n",
+                 HTTP_MAX_BODY_SIZE);
+    ASSERT_TRUE(n > 0);
+    hdr_len = (size_t)n;
+    body_len = (size_t)HTTP_MAX_BODY_SIZE;
+    msg = malloc(hdr_len + body_len);
+    ASSERT_TRUE(msg != NULL);
+    if (msg == NULL) {
+        return;
+    }
+    memcpy(msg, hdr, hdr_len);
+    memset(msg + hdr_len, 'b', body_len);
+    ASSERT_EQ(http_parse_request(msg, hdr_len + body_len, &req), HTTP_PARSE_OK);
+    ASSERT_EQ(req.body_length, body_len);
+    http_request_destroy(&req);
+    free(msg);
+}
+
+static void test_colon_in_header_value(void) {
+    http_request_t req;
+    http_request_init(&req);
+    ASSERT_EQ(parse_cstr("GET / HTTP/1.1\r\nAuthorization: abc:def:ghi\r\n\r\n", &req),
+              HTTP_PARSE_OK);
+    ASSERT_EQ(req.header_count, 1);
+    ASSERT_STR_EQ(req.headers[0].value, "abc:def:ghi");
     http_request_destroy(&req);
 }
 
@@ -388,6 +516,12 @@ int main(void) {
     test_empty_header_name();
     test_too_many_headers();
     test_content_length_errors();
+    test_content_length_leading_zeros();
+    test_content_length_and_transfer_encoding();
+    test_nul_in_metadata();
+    test_extra_body_bytes_rejected();
+    test_body_size_boundaries();
+    test_colon_in_header_value();
     test_body_above_limit();
     test_duplicate_content_length();
     test_chunked_rejected();

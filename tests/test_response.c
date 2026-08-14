@@ -184,6 +184,51 @@ static void test_build_json_and_body_copy(void) {
     http_response_destroy(&response);
 }
 
+static void test_error_status_serialization(void) {
+    const struct {
+        int code;
+        const char *phrase;
+    } cases[] = {
+        {400, "Bad Request"},
+        {404, "Not Found"},
+        {405, "Method Not Allowed"},
+        {413, "Payload Too Large"},
+        {500, "Internal Server Error"},
+        {501, "Not Implemented"},
+        {505, "HTTP Version Not Supported"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        http_response_t response;
+        http_response_init(&response);
+        ASSERT_EQ(http_response_build_text(&response, cases[i].code, "err"), 0);
+
+        unsigned char *wire = NULL;
+        size_t wire_len = 0;
+        ASSERT_EQ(http_response_serialize(&response, 0, &wire, &wire_len), 0);
+
+        char status[64];
+        snprintf(status, sizeof(status), "HTTP/1.1 %d %s\r\n", cases[i].code, cases[i].phrase);
+        ASSERT_TRUE(strstr((char *)wire, status) == (char *)wire);
+        ASSERT_TRUE(strstr((char *)wire, "Content-Length: 3\r\n") != NULL);
+        ASSERT_TRUE(strstr((char *)wire, "Content-Type:") != NULL);
+        ASSERT_TRUE(strstr((char *)wire, "Connection: close\r\n") != NULL);
+        const char *body = strstr((char *)wire, "\r\n\r\n");
+        ASSERT_TRUE(body != NULL);
+        ASSERT_TRUE(memcmp(body + 4, "err", 3) == 0);
+
+        if (cases[i].code == 405) {
+            ASSERT_EQ(http_response_add_header(&response, "Allow", "GET, HEAD"), 0);
+            free(wire);
+            ASSERT_EQ(http_response_serialize(&response, 0, &wire, &wire_len), 0);
+            ASSERT_TRUE(strstr((char *)wire, "Allow: GET, HEAD\r\n") != NULL);
+        }
+
+        free(wire);
+        http_response_destroy(&response);
+    }
+}
+
 int main(void) {
     test_reason_phrases();
     test_serialize_get_like();
@@ -191,6 +236,7 @@ int main(void) {
     test_content_length_matches_body();
     test_does_not_duplicate_manual_headers();
     test_build_json_and_body_copy();
+    test_error_status_serialization();
 
     printf("test_response: %d assertions passed, %d failed\n", g_passed, g_failures);
     return g_failures == 0 ? 0 : 1;

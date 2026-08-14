@@ -8,7 +8,7 @@ It implements manual HTTP parsing, an application router, secure static file
 serving, MIME detection, thread-safe verbose logging, runtime statistics, and
 graceful signal-driven shutdown — without an HTTP framework or parsing library.
 
-**Status: Stage 6 of a staged build-out.** See
+**Status: Stage 7 of a staged build-out.** See
 [`docs/roadmap.md`](docs/roadmap.md) for what is implemented versus planned.
 
 ## Features
@@ -26,12 +26,13 @@ Implemented so far:
 - Secure static file serving with MIME detection and binary-safe responses
 - Path traversal protection (literal and percent-encoded) + symlink escape checks
 - Custom `404.html`, correct HEAD metadata without sending a body
-- Unit/integration tests including reliability and sanitizer builds
+- Hardened unit/integration suite: framing, fuzz-style parser stress, raw
+  malformed clients, ASan/UBSan, optional Valgrind/coverage
 
 Planned:
 
-- Keep-alive, chunked encoding, TLS, benchmarks
-- Broader Stage 7 testing pass
+- Keep-alive, chunked encoding, TLS
+- Stage 8 performance benchmarks
 
 ## Architecture
 
@@ -147,9 +148,17 @@ Stop with `Ctrl+C`.
 ## Testing
 
 ```bash
-make test
-make integration
+make test          # unit tests (includes a modest deterministic parser fuzz pass)
+make integration   # live server checks, including raw malformed clients
+make sanitize      # ASan/UBSan unit tests
+make fuzz          # deeper deterministic parser fuzz (override with CINDERHTTP_FUZZ_ITERS)
+make valgrind      # optional Valgrind sweep
+make coverage      # optional gcov summary
 ```
+
+Details: [`docs/testing.md`](docs/testing.md). The parser is exercised against
+deterministic random and mutated malformed inputs; this is regression hardening,
+not formal verification.
 
 ## Memory Safety
 
@@ -159,14 +168,14 @@ UndefinedBehaviorSanitizer. Ownership: [`docs/memory_model.md`](docs/memory_mode
 ## Limitations
 
 - No keep-alive, chunked encoding, TLS, directory listings, or `sendfile()`
+- No client read-timeout architecture (slow clients can occupy a worker)
 - Static files buffered in memory up to 16 MiB
 - No dynamic thread-pool resizing
 - Query strings are not parsed into key/value maps
 
 ## Future Work
 
-Next up is **Stage 7 — broader testing hardening**, then Stage 8 performance.
-See [`docs/roadmap.md`](docs/roadmap.md).
+Next up is **Stage 8 — Performance**. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## License
 
