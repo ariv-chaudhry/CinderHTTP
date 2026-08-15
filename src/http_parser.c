@@ -442,8 +442,8 @@ http_parse_result_t http_parse_request(const unsigned char *data, size_t data_le
         return HTTP_PARSE_BAD_REQUEST; /* incomplete message handed to parser */
     }
     if (data_length > header_bytes + expected_body) {
-        /* Extra trailing bytes after a complete message are not accepted in
-         * the one-request-per-connection model (could be pipelining). */
+        /* Parser expects exactly one framed message. Leftover bytes belong to
+         * the connection reader, not this call. */
         return HTTP_PARSE_BAD_REQUEST;
     }
 

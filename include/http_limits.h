@@ -26,6 +26,12 @@
 #define HTTP_MAX_MESSAGE_BYTES (HTTP_MAX_HEADER_BYTES + HTTP_MAX_BODY_SIZE)
 
 /*
+ * Hard cap on sequential requests on one TCP connection. After this many
+ * responses the server sends Connection: close and releases the worker.
+ */
+#define HTTP_MAX_REQUESTS_PER_CONNECTION 100
+
+/*
  * Stage 3 buffers static files in memory before sending. This cap prevents a
  * single huge file from exhausting RAM. Streaming / sendfile() is future work.
  * Oversized static files yield 413 Payload Too Large.

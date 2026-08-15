@@ -8,8 +8,8 @@ shutdown behavior — not internal implementation trivia.
 
 | Category | What it covers |
 | --- | --- |
-| Unit | Parser, response, MIME, static files, router, stats, queue, reliability, HTTP reader |
-| Integration | Live server via curl + `tests/integration/raw_http.py` |
+| Unit | Parser, response, MIME, static files, router, stats, queue, reliability, HTTP reader, connection policy |
+| Integration | Live server via curl + `raw_http.py` + `test_keep_alive.py` |
 | Reliability | SIGPIPE/`send_all`, queue drain, malformed regressions (Stage 6) |
 | Fuzz-style | Deterministic random + mutated inputs to `http_parse_request` |
 | Sanitizer | ASan + UBSan via `make debug test` / `make sanitize` |
@@ -22,7 +22,7 @@ shutdown behavior — not internal implementation trivia.
 ```bash
 make test                 # unit suite (includes ~2000 fuzz iterations + bench parser tests)
 make benchmark-test       # Python unittest for wrk/hey/ab parsers only
-make integration          # live Stage 2–7 checks
+make integration          # live Stage 2–7 checks + Stage 9 keep-alive suite
 make sanitize             # ASan/UBSan unit tests
 make debug test           # same, explicit debug flags in one make run
 make fuzz                 # deeper parser fuzz (default 50,000 iterations)
@@ -71,8 +71,29 @@ or formal verification claim.
 bytes, optional write half-close, chunked sends with pauses, and a bounded
 socket timeout so the integration suite cannot hang forever.
 
+## Stage 9 keep-alive coverage
+
+`tests/integration/test_keep_alive.py` uses raw sockets and parses responses by
+`Content-Length` (never “read until close” for persistent replies). It covers:
+
+- HTTP/1.1 persistence and `Connection: close`
+- HTTP/1.0 default close and explicit keep-alive
+- Multi-request framing on one TCP connection
+- Coalesced TCP data and fragmented requests (via unit reader tests)
+- POST body followed by next request
+- HEAD followed by GET (no body bytes stolen from the next response)
+- Idle timeout (`--keep-alive-timeout 1` in the harness)
+- Malformed second / invalid request → error + close
+- Connection counters vs request counters
+- Concurrent clients each sending multiple keep-alive requests (8×5)
+
+Unit coverage also includes connection-token parsing, persistence policy,
+response `Connection` headers, coalesced/fragmented reader extraction, and
+POST+GET body framing leftovers.
+
 ## Philosophy
 
 Prefer tests that would catch real regressions: fragmented framing, limit±1
 sizes, malformed metadata, filesystem confinement, HEAD length correctness,
-queue/stats concurrency, and live-server survival after bad clients.
+keep-alive stream framing, queue/stats concurrency, and live-server survival
+after bad clients.

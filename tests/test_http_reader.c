@@ -299,6 +299,114 @@ static void test_send_all_socketpair(void) {
     close(fds[0]);
 }
 
+static void test_coalesced_two_requests(void) {
+    int fds[2];
+    ASSERT_EQ(open_pair(fds), 0);
+
+    const char *msg = "GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n"
+                      "GET /api/stats HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ(send_all(fds[0], msg, strlen(msg)), (ssize_t)strlen(msg));
+    close(fds[0]);
+
+    http_reader_t reader;
+    http_reader_init(&reader);
+
+    unsigned char *buf1 = NULL;
+    size_t len1 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_TRUE(buf1 != NULL);
+    ASSERT_TRUE(memcmp(buf1, "GET /api/health", 15) == 0);
+    free(buf1);
+
+    unsigned char *buf2 = NULL;
+    size_t len2 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_TRUE(buf2 != NULL);
+    ASSERT_TRUE(memcmp(buf2, "GET /api/stats", 14) == 0);
+    free(buf2);
+
+    http_reader_destroy(&reader);
+    close(fds[1]);
+}
+
+static void test_post_then_get_coalesced(void) {
+    int fds[2];
+    ASSERT_EQ(open_pair(fds), 0);
+
+    const char *msg = "POST /api/echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n"
+                      "hello"
+                      "GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n";
+    ASSERT_EQ(send_all(fds[0], msg, strlen(msg)), (ssize_t)strlen(msg));
+    close(fds[0]);
+
+    http_reader_t reader;
+    http_reader_init(&reader);
+
+    unsigned char *buf1 = NULL;
+    size_t len1 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_TRUE(len1 >= 5);
+    ASSERT_TRUE(memcmp(buf1 + len1 - 5, "hello", 5) == 0);
+    free(buf1);
+
+    unsigned char *buf2 = NULL;
+    size_t len2 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_TRUE(memcmp(buf2, "GET /api/health", 15) == 0);
+    free(buf2);
+
+    http_reader_destroy(&reader);
+    close(fds[1]);
+}
+
+static void test_partial_second_then_complete(void) {
+    int fds[2];
+    ASSERT_EQ(open_pair(fds), 0);
+
+    const char *first = "GET /a HTTP/1.1\r\nHost: x\r\n\r\n";
+    const char *second_part1 = "GET /b HTTP/1.1\r\nHo";
+    const char *second_part2 = "st: x\r\n\r\n";
+
+    pthread_t tid;
+    /* Send first+half of second, then remainder after a short pause via writer. */
+    size_t chunks1[] = {strlen(first) + strlen(second_part1)};
+    char combined[256];
+    size_t c_len = 0;
+    memcpy(combined + c_len, first, strlen(first));
+    c_len += strlen(first);
+    memcpy(combined + c_len, second_part1, strlen(second_part1));
+    c_len += strlen(second_part1);
+
+    writer_args_t wargs = {.fd = fds[0],
+                           .data = (const unsigned char *)combined,
+                           .length = c_len,
+                           .chunks = chunks1,
+                           .chunk_count = 1,
+                           .close_after = 0};
+    ASSERT_EQ(pthread_create(&tid, NULL, fragmented_writer, &wargs), 0);
+
+    http_reader_t reader;
+    http_reader_init(&reader);
+    unsigned char *buf1 = NULL;
+    size_t len1 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_TRUE(memcmp(buf1, "GET /a ", 7) == 0);
+    free(buf1);
+    ASSERT_EQ(pthread_join(tid, NULL), 0);
+
+    ASSERT_EQ(send_all(fds[0], second_part2, strlen(second_part2)), (ssize_t)strlen(second_part2));
+    close(fds[0]);
+
+    unsigned char *buf2 = NULL;
+    size_t len2 = 0;
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_TRUE(memcmp(buf2, "GET /b ", 7) == 0);
+    free(buf2);
+
+    http_reader_destroy(&reader);
+    close(fds[1]);
+}
+
 int main(void) {
     test_fragmented_get();
     test_crlf_splits();
@@ -309,6 +417,9 @@ int main(void) {
     test_body_size_boundary();
     test_chunked_rejected_by_reader();
     test_send_all_socketpair();
+    test_coalesced_two_requests();
+    test_post_then_get_coalesced();
+    test_partial_second_then_complete();
 
     printf("test_http_reader: %d assertions passed, %d failed\n", g_passed, g_failures);
     return g_failures == 0 ? 0 : 1;

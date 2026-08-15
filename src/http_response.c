@@ -17,6 +17,7 @@ void http_response_init(http_response_t *response) {
     response->body = NULL;
     response->body_length = 0;
     response->body_owned = 0;
+    response->suppress_auto_connection_close = 0;
 }
 
 void http_response_destroy(http_response_t *response) {
@@ -55,6 +56,8 @@ const char *http_reason_phrase(int status_code) {
             return "Not Found";
         case 405:
             return "Method Not Allowed";
+        case 408:
+            return "Request Timeout";
         case 413:
             return "Payload Too Large";
         case 500:
@@ -130,6 +133,37 @@ int http_response_add_header(http_response_t *response, const char *name, const 
     response->headers[response->header_count].value = value_copy;
     response->header_count++;
     return 0;
+}
+
+int http_response_remove_header(http_response_t *response, const char *name) {
+    if (response == NULL || name == NULL || response->headers == NULL) {
+        return 0;
+    }
+    int removed = 0;
+    size_t i = 0;
+    while (i < response->header_count) {
+        if (header_name_equal(response->headers[i].name, name)) {
+            free(response->headers[i].name);
+            free(response->headers[i].value);
+            size_t last = response->header_count - 1;
+            if (i != last) {
+                response->headers[i] = response->headers[last];
+            }
+            response->header_count--;
+            removed++;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
+int http_response_set_header(http_response_t *response, const char *name, const char *value) {
+    if (response == NULL || name == NULL || value == NULL) {
+        return -1;
+    }
+    (void)http_response_remove_header(response, name);
+    return http_response_add_header(response, name, value);
 }
 
 int http_response_set_body_owned(http_response_t *response, unsigned char *body, size_t length) {
@@ -262,7 +296,8 @@ int http_response_serialize(const http_response_t *response, int omit_body,
     const char *connection_hdr = "Connection: close\r\n";
 
     int need_server = !response_has_header(response, "Server");
-    int need_connection = !response_has_header(response, "Connection");
+    int need_connection = !response_has_header(response, "Connection") &&
+                          !response->suppress_auto_connection_close;
     int need_content_length = !response_has_header(response, "Content-Length");
 
     size_t total = (size_t)status_len;

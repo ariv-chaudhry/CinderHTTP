@@ -39,6 +39,7 @@ void config_set_defaults(server_config_t *config) {
     config->worker_count = CONFIG_DEFAULT_WORKER_COUNT;
     config->queue_capacity = CONFIG_DEFAULT_QUEUE_CAPACITY;
     config->verbose = 0;
+    config->keep_alive_timeout_sec = CONFIG_DEFAULT_KEEP_ALIVE_TIMEOUT_SEC;
 
     /* The default root is a short, known-good literal; truncation here would
      * mean CONFIG_DEFAULT_DOCUMENT_ROOT itself was misconfigured at build
@@ -100,6 +101,19 @@ config_parse_result_t config_parse_args(server_config_t *config, int argc, char 
                         sizeof(config->document_root) - 1);
                 return CONFIG_PARSE_ERROR;
             }
+        } else if (strcmp(arg, "--keep-alive-timeout") == 0) {
+            if (!parse_long_arg(argc, argv, &i, "--keep-alive-timeout", &value)) {
+                return CONFIG_PARSE_ERROR;
+            }
+            if (value < CONFIG_MIN_KEEP_ALIVE_TIMEOUT_SEC ||
+                value > CONFIG_MAX_KEEP_ALIVE_TIMEOUT_SEC) {
+                fprintf(stderr,
+                        "cinderhttp: --keep-alive-timeout must be between %d and %d (got %ld)\n",
+                        CONFIG_MIN_KEEP_ALIVE_TIMEOUT_SEC, CONFIG_MAX_KEEP_ALIVE_TIMEOUT_SEC,
+                        value);
+                return CONFIG_PARSE_ERROR;
+            }
+            config->keep_alive_timeout_sec = (int)value;
         } else {
             fprintf(stderr, "cinderhttp: unrecognized option '%s'\n", arg);
             fprintf(stderr, "Try 'cinderhttp --help' for usage information.\n");
@@ -114,25 +128,27 @@ void config_print_usage(FILE *stream) {
     fprintf(stream,
             "Usage: cinderhttp [OPTIONS]\n"
             "\n"
-            "CinderHTTP is a multithreaded HTTP/1.1 server written from scratch in C.\n"
+            "CinderHTTP is a multithreaded HTTP/1.0–1.1 server written from scratch in C.\n"
             "\n"
             "Options:\n"
-            "  --port <port>          TCP port to listen on (default: %d)\n"
-            "  --workers <count>      Worker thread pool size (default: %d)\n"
-            "  --queue-size <count>   Bounded connection queue capacity (default: %d)\n"
-            "  --root <path>          Document root for static files (default: %s)\n"
-            "  --verbose              Enable verbose diagnostic logging\n"
-            "  --help                 Show this help message and exit\n"
+            "  --port <port>                 TCP port to listen on (default: %d)\n"
+            "  --workers <count>             Worker thread pool size (default: %d)\n"
+            "  --queue-size <count>          Bounded connection queue capacity (default: %d)\n"
+            "  --root <path>                 Document root for static files (default: %s)\n"
+            "  --keep-alive-timeout <sec>    Idle/read timeout per client socket (default: %d)\n"
+            "  --verbose                     Enable verbose diagnostic logging\n"
+            "  --help                        Show this help message and exit\n"
             "\n"
             "Examples:\n"
             "  cinderhttp\n"
             "  cinderhttp --port 9000\n"
             "  cinderhttp --workers 8 --root ./public\n"
-            "  cinderhttp --queue-size 128 --verbose\n"
+            "  cinderhttp --queue-size 128 --keep-alive-timeout 5 --verbose\n"
             "\n"
             "Concurrency: the accept thread enqueues client sockets into a bounded queue;\n"
             "--workers sets the fixed pthread worker-pool size and --queue-size sets the\n"
-            "queue capacity (backpressure when full). --root selects the static-file root.\n",
+            "queue capacity (backpressure when full). A worker may handle multiple sequential\n"
+            "requests on one persistent connection until close/timeout/max-requests.\n",
             CONFIG_DEFAULT_PORT, CONFIG_DEFAULT_WORKER_COUNT, CONFIG_DEFAULT_QUEUE_CAPACITY,
-            CONFIG_DEFAULT_DOCUMENT_ROOT);
+            CONFIG_DEFAULT_DOCUMENT_ROOT, CONFIG_DEFAULT_KEEP_ALIVE_TIMEOUT_SEC);
 }

@@ -1,6 +1,6 @@
 # Memory Model
 
-Ownership rules through Stage 6. Every allocation and socket has a clear owner
+Ownership rules through Stage 9. Every allocation and socket has a clear owner
 and a matching release path.
 
 ## Process / subsystem lifetime
@@ -73,19 +73,46 @@ Never destroy `server_stats_t` until workers are joined.
 | After successful `accept()` | Accept / server thread | Must close if not successfully queued |
 | After successful `connection_queue_push()` | Queue / worker subsystem | Accept thread must **not** close |
 | After `connection_queue_pop()` | That worker | Passes to `client_handle()` |
-| Inside `client_handle()` | Client handler | Closes exactly once on all paths |
+| Inside `client_handle()` | Client handler | Owns fd for the whole keep-alive session; closes exactly once when the connection finishes |
 | Push fails (shutdown/error) | Accept thread | Close exactly once; ownership never transferred |
 
 No descriptor should be leaked, processed twice, or closed twice.
+The reader never closes `client_fd`. Keep-alive does not re-queue the same fd.
 
 Worker `worker_arg_t` allocations are freed by the worker thread immediately
 after startup (or by `thread_pool_start` if `pthread_create` fails).
 
-## Raw receive buffer
+## Connection reader buffer
 
-- Allocated by `http_read_request()` via `malloc`/`realloc`.
-- On success, ownership is transferred to the caller through `*buffer`.
-- `client_handle()` frees this buffer after parsing (including error paths).
+```text
+http_reader_t  (lives for the connection inside client_handle)
+    owns: data[] accumulation buffer
+    length = unconsumed bytes only
+
+http_reader_next_request()
+    → on HTTP_READ_OK: malloc copy of exactly one framed message
+       leftovers compacted (memmove) inside reader
+    → caller frees the copy after parse
+    → http_reader_destroy() frees the accumulation buffer
+```
+
+- Size limits (`HTTP_MAX_*`) apply per extracted request, not to the lifetime
+  sum of a persistent connection.
+- After extraction, only remaining unconsumed bytes stay in the reader.
+- One-shot `http_read_request()` wraps init → next → destroy (discards leftovers).
+
+## Per-request objects
+
+Each loop iteration in `client_handle()` creates independent:
+
+```text
+http_request_t
+http_response_t
+raw framed-message copy
+```
+
+All are destroyed / freed before the next iteration or connection exit.
+No request-owned pointer may survive into the next request.
 
 ## `http_request_t`
 

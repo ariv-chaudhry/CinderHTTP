@@ -22,6 +22,12 @@ typedef struct {
     unsigned char *body;
     size_t body_length;
     int body_owned; /* 1 if destroy() should free(body) */
+
+    /*
+     * When non-zero, serialize() will not auto-insert Connection: close if the
+     * response has no Connection header (used for HTTP/1.1 keep-alive).
+     */
+    int suppress_auto_connection_close;
 } http_response_t;
 
 void http_response_init(http_response_t *response);
@@ -33,6 +39,15 @@ void http_response_set_status(http_response_t *response, int status_code);
 
 /* Copies name and value into owned storage. Returns 0 on success, -1 on OOM. */
 int http_response_add_header(http_response_t *response, const char *name, const char *value);
+
+/*
+ * Case-insensitive replace-or-add for a header name. Avoids duplicates.
+ * Returns 0 on success, -1 on error.
+ */
+int http_response_set_header(http_response_t *response, const char *name, const char *value);
+
+/* Removes all headers matching name (case-insensitive). Returns count removed. */
+int http_response_remove_header(http_response_t *response, const char *name);
 
 /* Takes ownership of `body` (must be malloc'd). body may be NULL if length 0. */
 int http_response_set_body_owned(http_response_t *response, unsigned char *body, size_t length);

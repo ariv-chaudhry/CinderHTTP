@@ -28,6 +28,7 @@
 #define CONFIG_DEFAULT_WORKER_COUNT 4
 #define CONFIG_DEFAULT_QUEUE_CAPACITY 64
 #define CONFIG_DEFAULT_DOCUMENT_ROOT "./public"
+#define CONFIG_DEFAULT_KEEP_ALIVE_TIMEOUT_SEC 5
 
 /*
  * Validation bounds for user-supplied values. These exist so a typo (or a
@@ -41,12 +42,16 @@
 #define CONFIG_MAX_WORKER_COUNT 256
 #define CONFIG_MIN_QUEUE_CAPACITY 1
 #define CONFIG_MAX_QUEUE_CAPACITY 4096
+#define CONFIG_MIN_KEEP_ALIVE_TIMEOUT_SEC 1
+#define CONFIG_MAX_KEEP_ALIVE_TIMEOUT_SEC 300
 
 /*
  * Immutable-after-startup server configuration.
  * `worker_count` sizes the fixed pthread worker pool; `queue_capacity` sizes
  * the bounded connection queue used for accept→worker handoff.
  * `document_root` is the static-file document root.
+ * `keep_alive_timeout_sec` is the SO_RCVTIMEO idle/read timeout (seconds)
+ * applied to each accepted client socket.
  */
 typedef struct {
     int port;
@@ -54,6 +59,7 @@ typedef struct {
     int queue_capacity;
     char document_root[PATH_MAX];
     int verbose;
+    int keep_alive_timeout_sec;
 } server_config_t;
 
 /* Outcome of config_parse_args(), distinguishing "keep going" from the two

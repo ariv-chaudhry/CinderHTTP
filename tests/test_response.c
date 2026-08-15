@@ -53,6 +53,7 @@ static void test_reason_phrases(void) {
     ASSERT_STR_EQ(http_reason_phrase(403), "Forbidden");
     ASSERT_STR_EQ(http_reason_phrase(404), "Not Found");
     ASSERT_STR_EQ(http_reason_phrase(405), "Method Not Allowed");
+    ASSERT_STR_EQ(http_reason_phrase(408), "Request Timeout");
     ASSERT_STR_EQ(http_reason_phrase(413), "Payload Too Large");
     ASSERT_STR_EQ(http_reason_phrase(500), "Internal Server Error");
     ASSERT_STR_EQ(http_reason_phrase(501), "Not Implemented");

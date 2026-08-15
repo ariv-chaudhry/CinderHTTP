@@ -386,3 +386,10 @@ if [[ "$fail" -ne 0 ]]; then
 fi
 
 echo "All Stage 2–7 integration checks passed."
+
+# --- Stage 9: persistent connections ---
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$script_dir/test_keep_alive.py" --port "$((port + 1))" --timeout 1
+else
+    echo "SKIP: python3 not available for Stage 9 keep-alive checks"
+fi

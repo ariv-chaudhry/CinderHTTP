@@ -4,8 +4,8 @@
 Starts fresh release-mode server instances across worker counts, warms up,
 runs repeated measurements with wrk/hey/ab, and writes JSON/CSV summaries.
 
-CinderHTTP does not support HTTP keep-alive; each request uses a new connection
-from the load generator's perspective as dictated by the selected tool.
+After Stage 9, CinderHTTP supports HTTP persistent connections with a bounded
+keep-alive/read timeout; load tools may reuse connections.
 """
 
 from __future__ import annotations
@@ -591,9 +591,8 @@ def run_external_tool(
             cmd.extend(["--script", str(lua)])
         cmd.append(url)
     elif tool == "hey":
-        # hey uses -z for duration; -c concurrency. No keep-alive disable flag
-        # needed for correctness claims — document one-request-per-connection
-        # server behavior separately.
+        # hey uses -z for duration; -c concurrency. Keep-alive is allowed
+        # (Stage 9); do not assert specific throughput deltas here.
         cmd = [
             "hey",
             "-z",
@@ -869,7 +868,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
         f"Connections: {args.connections}  Duration: {args.duration:g}s  "
         f"Iterations: {args.iterations}  Warm-up: {args.warmup_duration:g}s\n"
         f"Queue size: {args.queue_size}\n"
-        "Note: CinderHTTP closes each connection after one request (no keep-alive)."
+        "Note: CinderHTTP supports HTTP/1.0–1.1 persistent connections with a "
+        "bounded keep-alive/read timeout (Stage 9)."
     )
 
     results_blocks: List[Dict[str, Any]] = []
@@ -963,7 +963,7 @@ def run_benchmark(args: argparse.Namespace) -> int:
             "iterations": args.iterations,
             "queue_size": args.queue_size,
             "binary": str(binary),
-            "keep_alive": False,
+            "keep_alive": True,
             "environment": {
                 "platform": platform.platform(),
                 "python": sys.version.split()[0],

@@ -4,9 +4,9 @@ CinderHTTP is being built in controlled stages rather than all at once.
 Checkboxes are only marked complete once the corresponding behavior has
 actually been implemented *and* exercised (compiled, run, and/or tested).
 
-Current status: **Stage 8 complete** - reproducible localhost benchmarking of
-release builds across worker counts, with warm-up, repeated runs, and structured
-JSON/CSV output (no fabricated performance claims).
+Current status: **Stage 9 complete** - HTTP/1.0–1.1 persistent connections with
+stateful request framing, bounded keep-alive/read timeouts, and maximum
+requests per connection, on top of the Stage 8 benchmarking harness.
 
 ## Phase 1 - TCP Core
 
@@ -93,15 +93,25 @@ JSON/CSV output (no fabricated performance claims).
 - [x] JSON benchmark output
 - [x] Human-readable aggregate report
 
+## Phase 9 - Persistent Connections
+
+- [x] HTTP/1.1 keep-alive by default
+- [x] HTTP/1.1 `Connection: close`
+- [x] HTTP/1.0 default-close semantics
+- [x] HTTP/1.0 explicit keep-alive
+- [x] Stateful multi-request connection reader
+- [x] Buffered next-request preservation
+- [x] Bounded keep-alive/read timeout
+- [x] Maximum requests per connection
+- [x] Multi-request integration coverage
+
 ---
 
 ### Notes on Stage 7
 
 - Framing is tested via `socketpair()` fragmentation and CRLFCRLF splits.
 - Duplicate `Content-Length` (identical or conflicting) is rejected.
-- Extra bytes after a declared body are rejected (no pipelining).
 - Embedded NUL bytes are rejected in protocol metadata; bodies may still be binary.
-- No client read-timeout subsystem yet (documented limitation).
 - See [`docs/testing.md`](testing.md) for commands and fuzz details.
 
 ### Notes on Stage 8
@@ -112,5 +122,17 @@ JSON/CSV output (no fabricated performance claims).
   are aggregated (mean / stdev) into JSON and CSV under `benchmarks/results/`.
 - Results are machine- and environment-dependent; they are a baseline for later
   optimization decisions, not production capacity claims.
-- CinderHTTP remains one-request-per-connection (no keep-alive).
 - See [`benchmarks/README.md`](../benchmarks/README.md).
+
+### Notes on Stage 9
+
+- Stateful `http_reader_t` extracts one framed request at a time and retains
+  leftovers (`memmove` compaction). The parser still sees a single message.
+- Persistence is version-aware; `Connection` tokens are case-insensitive and
+  comma-list aware; conflicting tokens prefer **close**.
+- Idle timeout uses `SO_RCVTIMEO` (per-recv, not an absolute whole-request
+  deadline). Idle silence closes without 408; partial request + timeout → 408.
+- A keep-alive connection pins its worker until close; timeout and
+  `HTTP_MAX_REQUESTS_PER_CONNECTION` bound occupancy.
+- Load tools may now reuse connections; Stage 8 methodology is unchanged.
+  Do not treat throughput deltas as committed claims without fresh measurements.

@@ -4,8 +4,12 @@ CinderHTTP’s Stage 8 goal is **measurement**, not premature optimization.
 
 The harness starts fresh **release-mode** (`-O2`) server processes, compares
 worker-pool sizes, warms up, repeats measurements, and writes structured
-results. It does **not** enable keep-alive (unsupported), sanitizer builds, or
-fabricated numbers.
+results. It does **not** enable sanitizer builds or fabricated numbers.
+
+After Stage 9, CinderHTTP supports HTTP/1.0–1.1 persistent connections with a
+bounded keep-alive/read timeout. Load generators (wrk/hey/ab) may reuse
+connections; treat any throughput change as environment-specific measurement,
+not a committed performance claim.
 
 ## Prerequisites
 
@@ -109,10 +113,9 @@ and do **not** run load.
 
 - Localhost numbers are **not** Internet-scale production claims.
 - Results vary with CPU, OS scheduler, power settings, and background load.
-- CinderHTTP uses **one request per connection** (`Connection: close`); tools
-  that open many concurrent connections still pay full handshake cost per
-  request relative to keep-alive servers.
+- CinderHTTP supports persistent connections (Stage 9); tools that reuse
+  connections may show higher throughput than Stage 8 one-shot baselines.
 - Stage 8 primarily varies **worker count**; queue size defaults high enough
   not to be the intended bottleneck unless you override it downward.
 - Use this baseline before considering later optimizations (`sendfile`, epoll,
-  keep-alive, etc.).
+  etc.).
