@@ -32,10 +32,11 @@
 #define HTTP_MAX_REQUESTS_PER_CONNECTION 100
 
 /*
- * Stage 3 buffers static files in memory before sending. This cap prevents a
- * single huge file from exhausting RAM. Streaming / sendfile() is future work.
+ * Upper bound on a single static file served by one worker. Files are streamed
+ * (Linux sendfile / bounded-buffer fallback), so this is no longer a heap-size
+ * guard — it limits how long one connection can monopolize a worker.
  * Oversized static files yield 413 Payload Too Large.
  */
-#define HTTP_MAX_STATIC_FILE_SIZE (16 * 1024 * 1024)
+#define HTTP_MAX_STATIC_FILE_SIZE (64 * 1024 * 1024)
 
 #endif /* CINDERHTTP_HTTP_LIMITS_H */

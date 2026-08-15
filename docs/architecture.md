@@ -1,8 +1,8 @@
 # Architecture
 
-CinderHTTP Stage 9 adds HTTP/1.x persistent connections and bounded read
-timeouts on top of the Stage 4–8 producer–consumer worker pool, application
-router, runtime stats, and benchmarking harness.
+CinderHTTP Stage 10 completes the implementation roadmap: a producer–consumer
+worker pool, application router, HTTP/1.x persistent connections, file-backed
+static streaming, and separate keep-alive vs request deadlines.
 
 ## Overview
 
@@ -44,10 +44,15 @@ router, runtime stats, and benchmarking harness.
                           |
             +-------------↺---------------+
             | read next HTTP request      |
+            |   (keep-alive vs request    |
+            |    timeout)                 |
             | parse                       |
             | route / static              |
             | apply Connection policy     |
             | send response               |
+            |   MEMORY → send_all         |
+            |   FILE → sendfile|fallback  |
+            |   HEAD → headers only       |
             | determine close / continue  |
             +-------------+---------------+
                           |
@@ -74,20 +79,38 @@ Shared synchronized state (does **not** serialize request handling):
 
 | Module | Responsibility |
 |--------|----------------|
-| `config` | CLI defaults and validation (incl. `--keep-alive-timeout`) |
+| `config` | CLI defaults/validation (`--keep-alive-timeout`, `--request-timeout`, …) |
 | `server` | Listen/accept, stats ownership, orchestration |
 | `connection_queue` | Bounded ring buffer + mutex/condvars (**connections**, not requests) |
 | `thread_pool` | Fixed joinable worker lifecycle |
 | `client_handler` | Connection loop: read/parse/dispatch/send; close once |
 | `http_connection` | Connection-token parsing + keep-alive / response policy |
-| `http_reader` | Stateful framing; leftover-byte preservation |
+| `http_reader` | Stateful framing; leftover preservation; dual timeout model |
 | `http_parser` | Single framed-message syntax |
 | `router` | `/api/*` method+path matching and handlers |
 | `server_stats` | Thread-safe counters + snapshots |
 | `logger` | Mutex-protected stderr logging |
-| `http_response` | Response model + serialization (`Content-Length` framing) |
-| `static_files` / `mime` | Secure static serving |
+| `http_response` | Response model; MEMORY / FILE body kinds; serialize + send |
+| `static_files` / `mime` | Secure resolve → open/`fstat` → file-backed response |
 | `utils` | `send_all()` |
+
+## File-backed static path
+
+```text
+request target
+  → strip query / URL-decode / lexical normalize
+  → realpath + document-root confinement
+  → open(O_RDONLY) + fstat
+  → http_response_set_file_body(fd, size)   # response owns fd
+  → http_response_send:
+        send headers
+        if HEAD (omit_body): stop
+        else: Linux sendfile()  —or—  fixed chunk read+send fallback
+  → http_response_destroy() closes fd
+```
+
+API routes and small error pages still use MEMORY bodies. Static success paths
+do **not** load the whole file into the heap.
 
 ## Persistent-connection tradeoff
 
@@ -98,21 +121,28 @@ workers = 4
 4 idle persistent clients  →  all workers occupied until idle timeout
 ```
 
-`--keep-alive-timeout` and `HTTP_MAX_REQUESTS_PER_CONNECTION` bound that
-occupancy. This is inherent to the blocking worker-pool design; Stage 9 does
-not introduce event-driven multiplexing.
+`--keep-alive-timeout`, `--request-timeout`, and
+`HTTP_MAX_REQUESTS_PER_CONNECTION` bound that occupancy. This is inherent to
+the blocking worker-pool design; event-driven multiplexing is intentionally
+out of scope (see optional extensions in [`roadmap.md`](roadmap.md)).
+
+The queue stores **accepted connections**, not individual keep-alive requests.
 
 ## Timeout model
 
-`SO_RCVTIMEO` is set on each accepted client socket to
-`config->keep_alive_timeout_sec` (default 5, range 1–300).
+Two complementary deadlines:
 
-- **Idle keep-alive** (no bytes yet for the next request) → silent close
-- **Partial request** + timeout → `408 Request Timeout` + `Connection: close`
-- Timeout is per blocking `recv`, not an absolute whole-request deadline
+| Timeout | When it applies | On expiry |
+|---------|-----------------|-----------|
+| `--keep-alive-timeout` | Idle wait with empty reader buffer (next request has not begun) | Silent close |
+| `--request-timeout` | Wall-clock (`CLOCK_MONOTONIC`) once any bytes of the current request are present | `408` + `Connection: close` |
 
-Shutdown remains bounded: a worker blocked in `recv` returns within the
-configured receive timeout, then joins the normal drain path.
+A socket receive timeout is also set as a backstop (the larger of the two
+configured values) so a worker blocked in `recv` cannot hang forever through
+shutdown.
+
+Shutdown remains bounded: a worker returns from `recv` within the backstop,
+then joins the normal drain path.
 
 ## Routing rules
 
@@ -138,7 +168,7 @@ connection_queue_shutdown + broadcast
       |
       v
 workers finish current connection
-  (recv timeout bounds idle keep-alive waits)
+  (recv backstop bounds idle / in-flight waits)
       |
       v
 workers exit (empty && shutting_down)

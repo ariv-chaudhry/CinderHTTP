@@ -1,7 +1,7 @@
 # HTTP Support
 
-This document describes what CinderHTTP implements today (Stage 9) and what is
-intentionally out of scope.
+This document describes what CinderHTTP implements (Stage 10 complete) and what
+is intentionally out of scope.
 
 ## Supported
 
@@ -18,13 +18,16 @@ intentionally out of scope.
 - HTTP/1.1 `Connection: close`
 - HTTP/1.0 default-close semantics
 - HTTP/1.0 explicit `Connection: keep-alive`
-- Bounded keep-alive / read timeout (`--keep-alive-timeout`, default 5s)
+- Bounded idle keep-alive timeout (`--keep-alive-timeout`, default 5s)
+- Total request framing deadline (`--request-timeout`, default 10s) → **408**
 - Maximum requests per connection (`HTTP_MAX_REQUESTS_PER_CONNECTION`, 100)
 - Sequential handling of buffered requests (TCP may deliver multiple messages
   in one `recv()`; they are processed one at a time in order)
 - Multithreaded accept → bounded queue → fixed worker pool
 - Application router for the reserved `/api/` namespace
 - Static file `GET` / `HEAD` from a configurable document root (`--root`)
+- File-backed static streaming (no full-file heap load)
+- Linux `sendfile()` transfer with bounded-buffer POSIX fallback
 - MIME type detection from file extension
 - Custom `404.html` when present under the document root
 - Query-string stripping for filesystem lookup (`/index.html?x=1` → `index.html`)
@@ -102,7 +105,7 @@ include its own response class yet).
 | 403 | Path traversal, symlink escape, or directory without index |
 | 404 | Static miss or unknown `/api/*` route |
 | 405 | Unsupported method (static or API) |
-| 408 | Partial request timed out before completion |
+| 408 | Partial request timed out before completion (request deadline) |
 | 413 | Oversized request body or oversized static file |
 | 501 | `Transfer-Encoding` (including chunked) |
 | 505 | Unsupported HTTP version |
@@ -110,15 +113,16 @@ include its own response class yet).
 
 ### Connection close vs continue
 
-**Close** after: client EOF; HTTP close policy; max requests; idle/read timeout;
-socket/framing/parser errors; 400 / 408 / 413 / 501 / 505 (and similar framing
-uncertainty); failed send.
+**Close** after: client EOF; HTTP close policy; max requests; idle keep-alive
+timeout; request deadline (408); socket/framing/parser errors; 400 / 408 / 413 /
+501 / 505 (and similar framing uncertainty); failed send.
 
 **May remain open** after valid framing with application outcomes such as
 200 / 403 / 404 / 405 (when the request itself was syntactically complete).
 
 Idle keep-alive timeout (no bytes for the next request) closes **silently**
-(no 408). Partial request + timeout → **408** + `Connection: close`.
+(no 408). Partial request + `--request-timeout` expiry → **408** +
+`Connection: close`.
 
 ## Security behavior (static files)
 
@@ -140,12 +144,14 @@ Idle keep-alive timeout (no bytes for the next request) closes **silently**
 | `HTTP_MAX_HEADERS` | 100 |
 | `HTTP_MAX_BODY_SIZE` | 1 MiB |
 | `HTTP_MAX_MESSAGE_BYTES` | headers + body (per request) |
-| `HTTP_MAX_STATIC_FILE_SIZE` | 16 MiB |
+| `HTTP_MAX_STATIC_FILE_SIZE` | 64 MiB (worker monopolization bound) |
 | `HTTP_MAX_REQUESTS_PER_CONNECTION` | 100 |
 | `--keep-alive-timeout` | default 5s (range 1–300) |
+| `--request-timeout` | default 10s (range 1–300) |
 
 Per-request size limits apply to each framed message, not the lifetime sum of
-a persistent connection.
+a persistent connection. The static-file cap limits how long one transfer can
+occupy a worker; file contents are streamed, not fully buffered on the heap.
 
 ## Not supported
 
@@ -154,16 +160,15 @@ a persistent connection.
 - TLS / HTTPS
 - HTTP/2 / HTTP/3
 - Directory listings
-- Range requests / ETag / compression
-- `sendfile()` zero-copy
+- Range requests
+- ETag / conditional GET
+- Response compression
 - Query-string key/value parsing beyond path extraction
-- Absolute whole-request deadline (timeout is per blocking `recv` via
-  `SO_RCVTIMEO`, not a total Slowloris deadline)
 
 ## Architecture note
 
 ```text
-HTTP reader/framer   (connection buffer; one framed message at a time)
+HTTP reader/framer   (connection buffer; dual timeout; one frame at a time)
        │
        ▼
 HTTP parser          (syntax only — no filesystem)
@@ -171,17 +176,18 @@ HTTP parser          (syntax only — no filesystem)
        ▼
 client_handle (may loop while keep-alive)
        │
-       ├── /api/* → router (health / echo / stats)
+       ├── /api/* → router (health / echo / stats) → MEMORY body
        │
        └── other → GET/HEAD static resolver
               ├── URL decode (one pass)
               ├── lexical normalize
               ├── realpath + root confinement
               ├── MIME detection
-              └── binary-safe load (GET) / metadata only (HEAD)
+              ├── open + fstat
+              └── FILE body → sendfile (Linux) / bounded-buffer fallback
                      │
                      ▼
-              http_response_t → send_all()
+              http_response_send (HEAD skips body)
                      │
                      └── close or next request
 ```
@@ -191,4 +197,5 @@ client_handle (may loop while keep-alive)
 A persistent connection remains assigned to the same worker until it closes.
 Idle keep-alive clients can occupy workers until `--keep-alive-timeout` fires.
 The bounded queue stores **accepted connections**, not individual keep-alive
-requests. Event-driven multiplexing is intentionally out of scope for Stage 9.
+requests. Event-driven multiplexing is intentionally out of scope for the
+completed roadmap.

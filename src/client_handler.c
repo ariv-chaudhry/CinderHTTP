@@ -144,12 +144,18 @@ static int build_static_error_response(const server_config_t *config, http_respo
 }
 
 static void log_request_if_verbose(const server_config_t *config, const http_request_t *request,
-                                   int status) {
+                                   const http_response_t *response, int status) {
     if (!config->verbose || request == NULL) {
         return;
     }
-    logger_verbose(1, "%s %s -> %d", http_method_to_string(request->method),
-                   request->target != NULL ? request->target : "?", status);
+    if (response != NULL && response->body_kind == HTTP_BODY_FILE) {
+        logger_verbose(1, "%s %s -> %d (file, %zu bytes)", http_method_to_string(request->method),
+                       request->target != NULL ? request->target : "?", status,
+                       response->body_length);
+    } else {
+        logger_verbose(1, "%s %s -> %d", http_method_to_string(request->method),
+                       request->target != NULL ? request->target : "?", status);
+    }
 }
 
 static int handle_static_get_head(const server_config_t *config, const http_request_t *request,
@@ -177,11 +183,11 @@ static int set_recv_timeout(int client_fd, int timeout_sec) {
 }
 
 /*
- * Per-connection lifecycle (Stage 9):
+ * Per-connection lifecycle:
  *   active_connections already +1 after successful queue push
- *   set SO_RCVTIMEO
+ *   set SO_RCVTIMEO backstop
  *   loop:
- *     read next framed request (may use leftover buffer bytes)
+ *     read next framed request (poll-based idle + request deadlines)
  *     parse → route/static → apply Connection policy → send
  *     close or continue
  *   finish active accounting → close fd exactly once
@@ -200,9 +206,12 @@ void client_handle(const server_config_t *config, server_stats_t *stats, int cli
         logger_verbose(config->verbose, "worker %d handling fd %d", worker_id, client_fd);
     }
 
-    if (set_recv_timeout(client_fd, config->keep_alive_timeout_sec) != 0) {
+    int backstop = config->keep_alive_timeout_sec;
+    if (config->request_timeout_sec > backstop) {
+        backstop = config->request_timeout_sec;
+    }
+    if (set_recv_timeout(client_fd, backstop) != 0) {
         perror("cinderhttp: SO_RCVTIMEO");
-        /* Continue with default (possibly infinite) timeout rather than abort. */
     }
 
     for (;;) {
@@ -220,8 +229,9 @@ void client_handle(const server_config_t *config, server_stats_t *stats, int cli
         int force_close = 0;
         size_t buffered_before = reader.length;
 
-        http_read_result_t read_result =
-            http_reader_next_request(&reader, client_fd, &raw, &raw_len);
+        http_read_result_t read_result = http_reader_next_request(
+            &reader, client_fd, &raw, &raw_len, config->keep_alive_timeout_sec,
+            config->request_timeout_sec);
 
         if (read_result == HTTP_READ_CLIENT_CLOSED) {
             if (worker_id >= 0) {
@@ -244,7 +254,7 @@ void client_handle(const server_config_t *config, server_stats_t *stats, int cli
                 free(raw);
                 break;
             }
-            /* Partial request timed out → 408 + close. */
+            /* Partial / in-progress request timed out → 408 + close. */
             status = build_static_error_response(config, &response, 408);
             if (status >= 0) {
                 response_ready = 1;
@@ -338,15 +348,19 @@ void client_handle(const server_config_t *config, server_stats_t *stats, int cli
         if (response_ready && status >= 0) {
             int persist = keep_alive && !force_close;
             if (http_response_apply_connection_policy(&response, persist, request.version) != 0) {
-                /* OOM applying Connection — force close after best-effort send. */
                 force_close = 1;
                 persist = 0;
                 (void)http_response_apply_connection_policy(&response, 0, request.version);
             }
 
-            log_request_if_verbose(config, &request, status);
+            log_request_if_verbose(config, &request, &response, status);
             if (http_response_send(client_fd, &response, omit_body) != 0) {
-                perror("cinderhttp: send response");
+                if (errno != EPIPE && errno != ECONNRESET) {
+                    perror("cinderhttp: send response");
+                } else if (worker_id >= 0) {
+                    logger_verbose(config->verbose, "fd %d: client disconnected during send",
+                                   client_fd);
+                }
                 force_close = 1;
             } else {
                 server_stats_response_sent(stats, status);
@@ -365,7 +379,6 @@ void client_handle(const server_config_t *config, server_stats_t *stats, int cli
             }
             break;
         }
-        /* Persist: loop for next request; leftovers remain in reader. */
     }
 
     http_reader_destroy(&reader);

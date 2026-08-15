@@ -8,10 +8,10 @@
  *     -> lexical normalization
  *     -> document-root confinement (including symlink resolution)
  *     -> MIME lookup
- *     -> optional binary-safe file load into http_response_t
+ *     -> open + fstat + file-backed http_response_t (no full-file heap load)
  *
- * Ownership of the response body is transferred to http_response_t on success
- * (body_owned=1); the caller destroys the response as usual.
+ * On success, the response owns an open file descriptor via
+ * http_response_set_file_body(); http_response_destroy() closes it.
  */
 #ifndef CINDERHTTP_STATIC_FILES_H
 #define CINDERHTTP_STATIC_FILES_H
@@ -34,10 +34,11 @@ typedef enum {
  *
  * document_root: configured document root (must exist and be a directory).
  * request: parsed request; original target is not modified.
- * response: on STATIC_FILE_OK, filled with status/headers/body (body may be
- *           empty when load_body is 0 for HEAD).
- * load_body: non-zero to read file contents; zero for HEAD (Content-Length
- *            still reflects the real file size).
+ * response: on STATIC_FILE_OK, filled with status/headers and a file-backed
+ *           body (Content-Length from fstat). HEAD still attaches the fd so
+ *           length is accurate; the sender skips body bytes when omit_body.
+ * load_body: retained for API compatibility; transfer is controlled by the
+ *            caller via http_response_send(..., omit_body).
  *
  * On any non-OK result, `response` is left in a destroy-safe empty state
  * (caller should build an error page separately, including custom 404).

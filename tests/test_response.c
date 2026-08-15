@@ -1,9 +1,13 @@
 /*
  * test_response.c - unit tests for HTTP response building and serialization.
  */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "http_response.h"
 
@@ -230,6 +234,81 @@ static void test_error_status_serialization(void) {
     }
 }
 
+static void test_file_body_send_and_head(void) {
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL) {
+        tmpdir = "/tmp";
+    }
+    char template[512];
+    snprintf(template, sizeof(template), "%s/cinderhttp_resp_XXXXXX", tmpdir);
+    char *dir = mkdtemp(template);
+    ASSERT_TRUE(dir != NULL);
+    if (dir == NULL) {
+        return;
+    }
+
+    char path[640];
+    snprintf(path, sizeof(path), "%s/blob.bin", dir);
+    unsigned char payload[] = {0x00, 0xff, 0x10, 0x20, 0x7f};
+    FILE *fp = fopen(path, "wb");
+    ASSERT_TRUE(fp != NULL);
+    ASSERT_TRUE(fwrite(payload, 1, sizeof(payload), fp) == sizeof(payload));
+    fclose(fp);
+
+    int fd = open(path, O_RDONLY);
+    ASSERT_TRUE(fd >= 0);
+
+    http_response_t response;
+    http_response_init(&response);
+    http_response_set_status(&response, 200);
+    ASSERT_EQ(http_response_add_header(&response, "Content-Type", "application/octet-stream"), 0);
+    ASSERT_EQ(http_response_set_file_body(&response, fd, (off_t)sizeof(payload)), 0);
+    ASSERT_EQ(response.body_kind, HTTP_BODY_FILE);
+    ASSERT_EQ(response.body_length, sizeof(payload));
+
+    unsigned char *hdrs = NULL;
+    size_t hdr_len = 0;
+    ASSERT_EQ(http_response_serialize_headers(&response, &hdrs, &hdr_len), 0);
+    ASSERT_TRUE(strstr((char *)hdrs, "Content-Length: 5\r\n") != NULL);
+    free(hdrs);
+
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_EQ(http_response_send(sv[0], &response, 0), 0);
+
+    unsigned char wire[256];
+    ssize_t n = recv(sv[1], wire, sizeof(wire), 0);
+    ASSERT_TRUE(n > 0);
+    wire[n < (ssize_t)sizeof(wire) ? (size_t)n : sizeof(wire) - 1] = '\0';
+    ASSERT_TRUE(strstr((char *)wire, "HTTP/1.1 200") != NULL);
+    unsigned char *body = (unsigned char *)strstr((char *)wire, "\r\n\r\n");
+    ASSERT_TRUE(body != NULL);
+    body += 4;
+    ASSERT_TRUE(memcmp(body, payload, sizeof(payload)) == 0);
+
+    close(sv[0]);
+    close(sv[1]);
+
+    /* HEAD: same Content-Length, no body bytes transferred. */
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_EQ(http_response_send(sv[0], &response, 1 /* omit body */), 0);
+    n = recv(sv[1], wire, sizeof(wire), 0);
+    ASSERT_TRUE(n > 0);
+    wire[(size_t)n < sizeof(wire) ? (size_t)n : sizeof(wire) - 1] = '\0';
+    ASSERT_TRUE(strstr((char *)wire, "Content-Length: 5\r\n") != NULL);
+    body = (unsigned char *)strstr((char *)wire, "\r\n\r\n");
+    ASSERT_TRUE(body != NULL);
+    body += 4;
+    ASSERT_EQ((size_t)(n - (body - wire)), 0);
+
+    close(sv[0]);
+    close(sv[1]);
+    http_response_destroy(&response); /* closes owned fd */
+
+    unlink(path);
+    rmdir(dir);
+}
+
 int main(void) {
     test_reason_phrases();
     test_serialize_get_like();
@@ -238,6 +317,7 @@ int main(void) {
     test_does_not_duplicate_manual_headers();
     test_build_json_and_body_copy();
     test_error_status_serialization();
+    test_file_body_send_and_head();
 
     printf("test_response: %d assertions passed, %d failed\n", g_passed, g_failures);
     return g_failures == 0 ? 0 : 1;

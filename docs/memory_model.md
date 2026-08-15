@@ -1,7 +1,7 @@
 # Memory Model
 
-Ownership rules through Stage 9. Every allocation and socket has a clear owner
-and a matching release path.
+Ownership rules through Stage 10. Every allocation, socket, and file
+descriptor has a clear owner and a matching release path.
 
 ## Process / subsystem lifetime
 
@@ -73,8 +73,10 @@ Never destroy `server_stats_t` until workers are joined.
 | After successful `accept()` | Accept / server thread | Must close if not successfully queued |
 | After successful `connection_queue_push()` | Queue / worker subsystem | Accept thread must **not** close |
 | After `connection_queue_pop()` | That worker | Passes to `client_handle()` |
-| Inside `client_handle()` | Client handler | Owns fd for the whole keep-alive session; closes exactly once when the connection finishes |
+| Inside `client_handle()` | Client handler | Owns client fd for the whole keep-alive session; closes exactly once when the connection finishes |
 | Push fails (shutdown/error) | Accept thread | Close exactly once; ownership never transferred |
+| Static file after `set_file_body()` success | `http_response_t` | `http_response_destroy()` closes `file_fd` |
+| Static file if `set_file_body()` fails | Caller (`static_files`) | Must close the open fd |
 
 No descriptor should be leaked, processed twice, or closed twice.
 The reader never closes `client_fd`. Keep-alive does not re-queue the same fd.
@@ -125,17 +127,43 @@ invalid after destroy.
 
 ## `http_response_t`
 
-Owns: header array / name / value strings, and `body` when `body_owned` is set.
+Body kinds:
+
+| Kind | Storage | Destroy behavior |
+|------|---------|------------------|
+| `HTTP_BODY_NONE` | empty | nothing |
+| `HTTP_BODY_MEMORY` | `body` heap buffer | frees when `body_owned` |
+| `HTTP_BODY_FILE` | open `file_fd` | **closes** `file_fd` |
+
+Also owns: header array / name / value strings.
 
 Does **not** own: `reason_phrase` (static string from `http_reason_phrase()`).
 
-`http_response_destroy()` frees owned storage.
+`http_response_set_file_body()` transfers fd ownership **only on success**.
+On failure, the caller retains the fd and must close it.
+
+## Memory vs file-backed responses
+
+```text
+API / small errors     → MEMORY body (heap, length = content size)
+Static GET/HEAD success → FILE body (open fd; no full-file heap load)
+```
+
+Static serving never reads the whole file into a single malloc'd buffer.
+`Content-Length` comes from `fstat`. Transfer uses Linux `sendfile()` or a
+fixed-size stack chunk (`HTTP_STATIC_SEND_CHUNK`, 32 KiB) for portable
+read+send — fallback buffer size is **O(1)** with respect to file size.
+
+`HTTP_MAX_STATIC_FILE_SIZE` (64 MiB) limits how long one connection can
+monopolize a worker; it is not a peak-heap bound for file contents.
 
 ## Serialized response bytes
 
-- `http_response_serialize()` allocates a wire buffer (trailing NUL for
-  convenience; reported length excludes it).
-- `http_response_send()` frees that buffer after `send_all()`.
+- Header serialization allocates a wire buffer for the status line + headers.
+- MEMORY bodies may be appended for serialize helpers; FILE bodies are never
+  embedded in that buffer.
+- `http_response_send()` sends headers, then streams MEMORY via `send_all` or
+  FILE via `sendfile`/fallback. HEAD (`omit_body`) sends headers only.
 
 ## Static-file path lifetime
 
@@ -152,21 +180,12 @@ freed before the function returns — including on error:
 Stack buffers (`PATH_MAX` arrays) hold temporary `realpath` / join results and
 need no free.
 
-## Static file body ownership
-
-- On successful GET, `read_entire_file()` allocates the body buffer.
-- Ownership is transferred into `http_response_t` via
-  `http_response_set_body_owned()` (`body_owned = 1`).
-- `http_response_destroy()` releases the body afterward.
-- On HEAD (`load_body = 0`), no file body is allocated; `body_length` is set
-  from `stat` metadata only.
-
 ## Custom 404 page
 
 `static_files_build_not_found()` may call `static_files_serve()` for
-`/404.html`. On success, that response (including owned body) is moved into
-the caller's `http_response_t` and retagged as status 404. On failure, a
-generated HTML error body is allocated instead.
+`/404.html`. On success, that response (including file-backed body ownership)
+is moved into the caller's `http_response_t` and retagged as status 404. On
+failure, a generated HTML error body is allocated instead (MEMORY).
 
 ## Logger
 
@@ -214,7 +233,7 @@ stopping at `?`.
 
 ## Known limitation (TOCTOU)
 
-Path validation uses `realpath`/`stat` then later `fopen`. A race between
-those calls is possible on a shared filesystem. This educational server does
-not claim production-grade sandboxing; descriptor-based hardening can be
-explored later without changing the Stage 5 API shape.
+Path validation uses `realpath`/`stat` then later `open`/`fstat`. A race
+between those calls is possible on a shared filesystem. This educational
+server does not claim production-grade sandboxing; descriptor-based hardening
+can be explored later without changing the static-files API shape.

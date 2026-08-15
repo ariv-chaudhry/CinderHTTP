@@ -393,3 +393,10 @@ if command -v python3 >/dev/null 2>&1; then
 else
     echo "SKIP: python3 not available for Stage 9 keep-alive checks"
 fi
+
+# --- Stage 10: static streaming + request deadline ---
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$script_dir/test_static_stream.py" --port "$((port + 2))"
+else
+    echo "SKIP: python3 not available for Stage 10 static checks"
+fi

@@ -8,28 +8,32 @@ shutdown behavior — not internal implementation trivia.
 
 | Category | What it covers |
 | --- | --- |
-| Unit | Parser, response, MIME, static files, router, stats, queue, reliability, HTTP reader, connection policy |
-| Integration | Live server via curl + `raw_http.py` + `test_keep_alive.py` |
-| Reliability | SIGPIPE/`send_all`, queue drain, malformed regressions (Stage 6) |
+| Unit | Parser, response (incl. file body), MIME, static files, router, stats, queue, reliability, HTTP reader, connection policy |
+| Integration | Live server via curl + `raw_http.py` + `test_keep_alive.py` + `test_static_stream.py` |
+| Reliability | SIGPIPE/`send_all`, queue drain, malformed regressions, client disconnect during transfer |
 | Fuzz-style | Deterministic random + mutated inputs to `http_parse_request` |
 | Sanitizer | ASan + UBSan via `make debug test` / `make sanitize` |
 | Valgrind | Optional leak/origin checks via `make valgrind` |
 | Coverage | Optional gcov summary via `make coverage` |
-| Performance | Optional load harness via `make benchmark` (separate from correctness) |
+| Performance | Optional load harness via `make benchmark` / `benchmark-api` / `benchmark-static` |
+| Profiling build | `make profile` (`-O2 -g` binary for external profilers) |
 
 ## Commands
 
 ```bash
 make test                 # unit suite (includes ~2000 fuzz iterations + bench parser tests)
 make benchmark-test       # Python unittest for wrk/hey/ab parsers only
-make integration          # live Stage 2–7 checks + Stage 9 keep-alive suite
+make integration          # live checks through Stage 10 (keep-alive + static stream)
 make sanitize             # ASan/UBSan unit tests
 make debug test           # same, explicit debug flags in one make run
 make fuzz                 # deeper parser fuzz (default 50,000 iterations)
 CINDERHTTP_FUZZ_ITERS=100000 make fuzz
 make valgrind             # skipped cleanly if Valgrind is missing
 make coverage             # clean rebuild with --coverage + gcov summary
+make profile              # -O2 -g binary suitable for external profilers
 make benchmark            # release build + load harness (requires wrk, hey, or ab)
+make benchmark-api        # API workload shortcut (GET /api/health)
+make benchmark-static     # generate fixtures + 1 MiB static workload
 make benchmark BENCH_ARGS="--connections 128 --duration 15"
 ```
 
@@ -39,6 +43,8 @@ Performance benchmarks are intentionally separate from correctness tests.
 
 ```bash
 make benchmark
+make benchmark-api
+make benchmark-static
 ```
 
 The harness starts fresh release-mode server instances across the selected
@@ -91,9 +97,26 @@ Unit coverage also includes connection-token parsing, persistence policy,
 response `Connection` headers, coalesced/fragmented reader extraction, and
 POST+GET body framing leftovers.
 
+## Stage 10 static streaming + deadline coverage
+
+`tests/integration/test_static_stream.py` exercises the file-backed path and
+request deadline. Coverage includes:
+
+- Static streaming GET with binary integrity (byte-exact body)
+- Large and zero-byte files (`Content-Length` correctness)
+- HEAD static metadata without body bytes
+- Persistent connection: static → API → static on one TCP session
+- Client disconnect mid-transfer does not kill the server
+- Request deadline / 408 on incomplete framing
+- Slow trickle that stays under per-recv idle but exceeds `--request-timeout`
+
+Unit coverage includes file-body send + HEAD (`tests/test_response.c`), static
+open/`fstat`/file-backed attach (`tests/test_static_files.c`), and reader
+timeout / disconnect paths (`tests/test_http_reader.c`).
+
 ## Philosophy
 
 Prefer tests that would catch real regressions: fragmented framing, limit±1
 sizes, malformed metadata, filesystem confinement, HEAD length correctness,
-keep-alive stream framing, queue/stats concurrency, and live-server survival
-after bad clients.
+keep-alive stream framing, file-backed transfer integrity, request deadlines,
+queue/stats concurrency, and live-server survival after bad clients.

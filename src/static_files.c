@@ -1,6 +1,7 @@
 #include "static_files.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,6 +12,10 @@
 
 #include "http_limits.h"
 #include "mime.h"
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -266,20 +271,29 @@ static static_file_result_t join_root_relative(const char *root, const char *rel
     return STATIC_FILE_OK;
 }
 
-static static_file_result_t read_entire_file(const char *path, size_t size, unsigned char **out_buf) {
-    *out_buf = NULL;
-    if (size == 0) {
-        unsigned char *empty = malloc(1);
-        if (empty == NULL) {
-            return STATIC_FILE_OUT_OF_MEMORY;
-        }
-        empty[0] = '\0';
-        *out_buf = empty;
-        return STATIC_FILE_OK;
+/*
+ * Open the resolved path, fstat the descriptor, and attach it as a file-backed
+ * response body. `expected_size` is the earlier discovery size; fstat is
+ * authoritative. load_body is unused for buffering — HEAD still attaches the
+ * fd so Content-Length matches; the sender omits bytes for HEAD.
+ */
+static static_file_result_t fill_file_response(http_response_t *response, const char *fs_path,
+                                               size_t expected_size, int load_body) {
+    (void)load_body;
+    (void)expected_size;
+
+    http_response_destroy(response);
+    http_response_init(response);
+    http_response_set_status(response, 200);
+
+    const char *mime = mime_type_from_path(fs_path);
+    if (http_response_add_header(response, "Content-Type", mime) != 0) {
+        return STATIC_FILE_OUT_OF_MEMORY;
     }
 
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL) {
+    int fd = open(fs_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        http_response_destroy(response);
         if (errno == EACCES) {
             return STATIC_FILE_FORBIDDEN;
         }
@@ -289,68 +303,42 @@ static static_file_result_t read_entire_file(const char *path, size_t size, unsi
         return STATIC_FILE_IO_ERROR;
     }
 
-    unsigned char *buf = malloc(size + 1);
-    if (buf == NULL) {
-        fclose(fp);
-        return STATIC_FILE_OUT_OF_MEMORY;
-    }
-
-    size_t total = 0;
-    while (total < size) {
-        size_t n = fread(buf + total, 1, size - total, fp);
-        if (n == 0) {
-            if (ferror(fp)) {
-                free(buf);
-                fclose(fp);
-                return STATIC_FILE_IO_ERROR;
-            }
-            break; /* EOF earlier than expected — treat as short read error */
-        }
-        total += n;
-    }
-    fclose(fp);
-
-    if (total != size) {
-        free(buf);
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        http_response_destroy(response);
         return STATIC_FILE_IO_ERROR;
     }
 
-    buf[size] = '\0'; /* convenience only; length is authoritative */
-    *out_buf = buf;
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        http_response_destroy(response);
+        return STATIC_FILE_FORBIDDEN;
+    }
+
+    if (st.st_size < 0) {
+        close(fd);
+        http_response_destroy(response);
+        return STATIC_FILE_IO_ERROR;
+    }
+    if ((unsigned long long)st.st_size > (unsigned long long)HTTP_MAX_STATIC_FILE_SIZE) {
+        close(fd);
+        http_response_destroy(response);
+        return STATIC_FILE_TOO_LARGE;
+    }
+    if ((unsigned long long)st.st_size > (unsigned long long)SIZE_MAX) {
+        close(fd);
+        http_response_destroy(response);
+        return STATIC_FILE_TOO_LARGE;
+    }
+
+    if (http_response_set_file_body(response, fd, st.st_size) != 0) {
+        close(fd);
+        http_response_destroy(response);
+        return STATIC_FILE_OUT_OF_MEMORY;
+    }
+    /* Ownership of fd transferred to response. */
     return STATIC_FILE_OK;
-}
-
-static int fill_file_response(http_response_t *response, const char *fs_path, size_t size,
-                              int load_body) {
-    http_response_destroy(response);
-    http_response_init(response);
-    http_response_set_status(response, 200);
-
-    const char *mime = mime_type_from_path(fs_path);
-    if (http_response_add_header(response, "Content-Type", mime) != 0) {
-        return -1;
-    }
-
-    if (load_body) {
-        unsigned char *body = NULL;
-        static_file_result_t rr = read_entire_file(fs_path, size, &body);
-        if (rr != STATIC_FILE_OK) {
-            free(body);
-            http_response_destroy(response);
-            return -1;
-        }
-        if (http_response_set_body_owned(response, body, size) != 0) {
-            free(body);
-            http_response_destroy(response);
-            return -1;
-        }
-    } else {
-        /* HEAD: advertise the real size without reading contents. */
-        response->body = NULL;
-        response->body_length = size;
-        response->body_owned = 0;
-    }
-    return 0;
 }
 
 /*
@@ -519,14 +507,11 @@ static_file_result_t static_files_serve(const char *document_root, const http_re
         goto done;
     }
 
-    if (fill_file_response(response, resolved, size, load_body) != 0) {
-        /* Distinguish OOM vs IO if possible — treat as IO/OOM generic. */
-        result = STATIC_FILE_IO_ERROR;
+    result = fill_file_response(response, resolved, size, load_body);
+    if (result != STATIC_FILE_OK) {
         http_response_destroy(response);
         goto done;
     }
-
-    result = STATIC_FILE_OK;
 
 done:
     free(path_only);

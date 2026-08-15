@@ -800,6 +800,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=WARMUP_DURATION,
         help="warm-up seconds discarded before measured iterations",
     )
+    p.add_argument(
+        "--generate-fixtures",
+        action="store_true",
+        help="generate benchmarks/fixtures and use that directory as --root "
+        "(implies static workload unless --path is set)",
+    )
+    p.add_argument(
+        "--fixture-size",
+        choices=["4k", "64k", "1m", "8m"],
+        default=None,
+        help="with --generate-fixtures, set --path to /benchmark-<size>.bin",
+    )
     return p
 
 
@@ -846,7 +858,20 @@ def run_benchmark(args: argparse.Namespace) -> int:
         raise FileNotFoundError(
             f"CinderHTTP binary not found at {binary}. Run `make` (release) first."
         )
-    doc_root = Path(args.root) if args.root else root / "public"
+
+    if args.generate_fixtures:
+        from generate_fixtures import generate
+
+        fixture_dir = root / "benchmarks" / "fixtures"
+        generate(fixture_dir)
+        doc_root = fixture_dir
+        if args.fixture_size:
+            args.path = f"/benchmark-{args.fixture_size}.bin"
+        elif args.path == DEFAULT_PATH:
+            args.path = "/benchmark-1m.bin"
+    else:
+        doc_root = Path(args.root) if args.root else root / "public"
+
     if not doc_root.is_dir():
         raise FileNotFoundError(f"document root not found: {doc_root}")
 
@@ -858,18 +883,23 @@ def run_benchmark(args: argparse.Namespace) -> int:
         out_csv = root / out_csv
 
     script_dir = Path(__file__).resolve().parent
-    expect_success = args.path == "/api/health" or args.path == "/"
+    expect_success = (
+        args.path == "/api/health"
+        or args.path == "/"
+        or args.path.startswith("/benchmark-")
+    )
 
     print(
         f"Benchmark tool: {tool}\n"
         f"Binary: {binary}\n"
+        f"Document root: {doc_root}\n"
         f"Target: http://{args.host}:{args.port}{args.path}\n"
         f"Workers: {workers_list}\n"
         f"Connections: {args.connections}  Duration: {args.duration:g}s  "
         f"Iterations: {args.iterations}  Warm-up: {args.warmup_duration:g}s\n"
         f"Queue size: {args.queue_size}\n"
-        "Note: CinderHTTP supports HTTP/1.0–1.1 persistent connections with a "
-        "bounded keep-alive/read timeout (Stage 9)."
+        "Note: CinderHTTP uses Linux sendfile()-based static transfer with a "
+        "bounded-buffer POSIX fallback; persistent connections are enabled."
     )
 
     results_blocks: List[Dict[str, Any]] = []

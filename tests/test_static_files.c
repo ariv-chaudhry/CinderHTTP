@@ -57,6 +57,51 @@ static int g_passed = 0;
 static char g_root[512];
 static char g_outside[512];
 
+/* Read response body bytes from MEMORY or FILE-backed responses. */
+static int read_body_bytes(const http_response_t *resp, unsigned char *out, size_t len) {
+    if (resp == NULL || (len > 0 && out == NULL)) {
+        return -1;
+    }
+    if (resp->body_length != len) {
+        return -1;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    if (resp->body_kind == HTTP_BODY_MEMORY) {
+        if (resp->body == NULL) {
+            return -1;
+        }
+        memcpy(out, resp->body, len);
+        return 0;
+    }
+    if (resp->body_kind == HTTP_BODY_FILE) {
+        if (resp->file_fd < 0) {
+            return -1;
+        }
+        if (lseek(resp->file_fd, 0, SEEK_SET) < 0) {
+            return -1;
+        }
+        size_t got = 0;
+        while (got < len) {
+            ssize_t n = read(resp->file_fd, out + got, len - got);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (n == 0) {
+                return -1;
+            }
+            got += (size_t)n;
+        }
+        (void)lseek(resp->file_fd, 0, SEEK_SET);
+        return 0;
+    }
+    return -1;
+}
+
 static int write_file(const char *path, const void *data, size_t len) {
     FILE *fp = fopen(path, "wb");
     if (fp == NULL) {
@@ -225,7 +270,12 @@ static void test_serve_ok(void) {
     ASSERT_EQ(static_files_serve(g_root, &req, &resp, 1), STATIC_FILE_OK);
     ASSERT_EQ(resp.status_code, 200);
     ASSERT_EQ(resp.body_length, 16);
-    ASSERT_TRUE(memcmp(resp.body, "<html>home</html>", 16) == 0);
+    ASSERT_EQ(resp.body_kind, HTTP_BODY_FILE);
+    {
+        unsigned char buf[32];
+        ASSERT_TRUE(read_body_bytes(&resp, buf, 16) == 0);
+        ASSERT_TRUE(memcmp(buf, "<html>home</html>", 16) == 0);
+    }
     clear_borrowed(&req);
     http_response_destroy(&resp);
 
@@ -262,6 +312,7 @@ static void test_empty_and_binary(void) {
     ASSERT_EQ(static_files_serve(g_root, &req, &resp, 1), STATIC_FILE_OK);
     ASSERT_EQ(resp.status_code, 200);
     ASSERT_EQ(resp.body_length, 0);
+    ASSERT_EQ(resp.body_kind, HTTP_BODY_FILE);
     clear_borrowed(&req);
     http_response_destroy(&resp);
 
@@ -269,7 +320,11 @@ static void test_empty_and_binary(void) {
     req = make_get("/blob.bin");
     ASSERT_EQ(static_files_serve(g_root, &req, &resp, 1), STATIC_FILE_OK);
     ASSERT_EQ(resp.body_length, 5);
-    ASSERT_TRUE(memcmp(resp.body, expected, 5) == 0);
+    {
+        unsigned char buf[8];
+        ASSERT_TRUE(read_body_bytes(&resp, buf, 5) == 0);
+        ASSERT_TRUE(memcmp(buf, expected, 5) == 0);
+    }
     clear_borrowed(&req);
     http_response_destroy(&resp);
 }
@@ -286,7 +341,9 @@ static void test_head_metadata(void) {
     ASSERT_EQ(get_resp.status_code, head_resp.status_code);
     ASSERT_EQ(get_resp.body_length, head_resp.body_length);
     ASSERT_EQ(head_resp.body_length, 5);
+    ASSERT_EQ(head_resp.body_kind, HTTP_BODY_FILE);
     ASSERT_TRUE(head_resp.body == NULL);
+    ASSERT_TRUE(head_resp.file_fd >= 0);
     clear_borrowed(&req);
     http_response_destroy(&get_resp);
     http_response_destroy(&head_resp);
@@ -327,8 +384,11 @@ static void test_traversal(void) {
         ASSERT_TRUE(rc == STATIC_FILE_FORBIDDEN || rc == STATIC_FILE_BAD_TARGET ||
                     rc == STATIC_FILE_NOT_FOUND);
         /* Must never return OK with outside content. */
-        if (rc == STATIC_FILE_OK && resp.body != NULL) {
-            ASSERT_TRUE(memcmp(resp.body, "TOPSECRET", 9) != 0);
+        if (rc == STATIC_FILE_OK) {
+            unsigned char buf[64];
+            if (resp.body_length >= 9 && read_body_bytes(&resp, buf, resp.body_length) == 0) {
+                ASSERT_TRUE(memcmp(buf, "TOPSECRET", 9) != 0);
+            }
         }
         clear_borrowed(&req);
         http_response_destroy(&resp);
@@ -375,7 +435,11 @@ static void test_dots_in_filename(void) {
     http_request_t req = make_get("/file..txt");
     ASSERT_EQ(static_files_serve(g_root, &req, &resp, 1), STATIC_FILE_OK);
     ASSERT_EQ(resp.body_length, 7);
-    ASSERT_TRUE(memcmp(resp.body, "dots-ok", 7) == 0);
+    {
+        unsigned char buf[16];
+        ASSERT_TRUE(read_body_bytes(&resp, buf, 7) == 0);
+        ASSERT_TRUE(memcmp(buf, "dots-ok", 7) == 0);
+    }
     clear_borrowed(&req);
     http_response_destroy(&resp);
 }
@@ -404,7 +468,11 @@ static void test_custom_404(void) {
     ASSERT_EQ(static_files_build_not_found(g_root, &resp), 0);
     ASSERT_EQ(resp.status_code, 404);
     ASSERT_EQ(resp.body_length, 19);
-    ASSERT_TRUE(memcmp(resp.body, "<html>missing</html>", 19) == 0);
+    {
+        unsigned char buf[32];
+        ASSERT_TRUE(read_body_bytes(&resp, buf, 19) == 0);
+        ASSERT_TRUE(memcmp(buf, "<html>missing</html>", 19) == 0);
+    }
     http_response_destroy(&resp);
 }
 

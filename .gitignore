@@ -20,3 +20,10 @@ vgcore.*
 # Local benchmark output (see benchmarks/results/README.md)
 benchmarks/results/*
 !benchmarks/results/.gitkeep
+
+# Generated static benchmark fixtures (see benchmarks/generate_fixtures.py)
+benchmarks/fixtures/
+
+# Profiling artifacts
+perf.data
+perf.data.*

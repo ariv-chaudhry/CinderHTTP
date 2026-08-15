@@ -1,10 +1,19 @@
 #include "http_response.h"
 
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#ifdef __linux__
+#include <sys/sendfile.h>
+#endif
 
 #include "utils.h"
+
+#define HTTP_STATIC_SEND_CHUNK 32768
 
 void http_response_init(http_response_t *response) {
     if (response == NULL) {
@@ -14,10 +23,26 @@ void http_response_init(http_response_t *response) {
     response->reason_phrase = http_reason_phrase(500);
     response->headers = NULL;
     response->header_count = 0;
+    response->body_kind = HTTP_BODY_NONE;
     response->body = NULL;
     response->body_length = 0;
     response->body_owned = 0;
+    response->file_fd = -1;
     response->suppress_auto_connection_close = 0;
+}
+
+static void clear_body(http_response_t *response) {
+    if (response->body_kind == HTTP_BODY_MEMORY && response->body_owned) {
+        free(response->body);
+    }
+    if (response->body_kind == HTTP_BODY_FILE && response->file_fd >= 0) {
+        close(response->file_fd);
+    }
+    response->body_kind = HTTP_BODY_NONE;
+    response->body = NULL;
+    response->body_length = 0;
+    response->body_owned = 0;
+    response->file_fd = -1;
 }
 
 void http_response_destroy(http_response_t *response) {
@@ -33,10 +58,7 @@ void http_response_destroy(http_response_t *response) {
         free(response->headers);
     }
 
-    if (response->body_owned) {
-        free(response->body);
-    }
-
+    clear_body(response);
     http_response_init(response);
 }
 
@@ -170,9 +192,12 @@ int http_response_set_body_owned(http_response_t *response, unsigned char *body,
     if (response == NULL) {
         return -1;
     }
-    if (response->body_owned) {
-        free(response->body);
+    clear_body(response);
+    if (length == 0 && body == NULL) {
+        response->body_kind = HTTP_BODY_NONE;
+        return 0;
     }
+    response->body_kind = HTTP_BODY_MEMORY;
     response->body = body;
     response->body_length = length;
     response->body_owned = (body != NULL) ? 1 : 0;
@@ -215,6 +240,23 @@ int http_response_set_body_copy(http_response_t *response, const unsigned char *
     }
     memcpy(copy, body, length);
     return http_response_set_body_owned(response, copy, length);
+}
+
+int http_response_set_file_body(http_response_t *response, int fd, off_t size) {
+    if (response == NULL || fd < 0 || size < 0) {
+        return -1;
+    }
+    if ((unsigned long long)size > (unsigned long long)SIZE_MAX) {
+        return -1;
+    }
+
+    clear_body(response);
+    response->body_kind = HTTP_BODY_FILE;
+    response->file_fd = fd;
+    response->body = NULL;
+    response->body_length = (size_t)size;
+    response->body_owned = 0;
+    return 0;
 }
 
 static int response_has_header(const http_response_t *response, const char *name) {
@@ -268,8 +310,8 @@ int http_response_build_json(http_response_t *response, int status_code, const c
     return 0;
 }
 
-int http_response_serialize(const http_response_t *response, int omit_body,
-                            unsigned char **out_buffer, size_t *out_length) {
+int http_response_serialize_headers(const http_response_t *response, unsigned char **out_buffer,
+                                    size_t *out_length) {
     if (response == NULL || out_buffer == NULL || out_length == NULL) {
         return -1;
     }
@@ -302,8 +344,8 @@ int http_response_serialize(const http_response_t *response, int omit_body,
 
     size_t total = (size_t)status_len;
     for (size_t i = 0; i < response->header_count; i++) {
-        total += strlen(response->headers[i].name) + 2; /* ": " */
-        total += strlen(response->headers[i].value) + 2; /* "\r\n" */
+        total += strlen(response->headers[i].name) + 2;
+        total += strlen(response->headers[i].value) + 2;
     }
     if (need_server) {
         total += strlen(server_hdr);
@@ -314,10 +356,7 @@ int http_response_serialize(const http_response_t *response, int omit_body,
     if (need_content_length) {
         total += (size_t)length_hdr_len;
     }
-    total += 2; /* final \r\n */
-    if (!omit_body) {
-        total += response->body_length;
-    }
+    total += 2;
 
     unsigned char *buffer = malloc(total + 1);
     if (buffer == NULL) {
@@ -359,33 +398,158 @@ int http_response_serialize(const http_response_t *response, int omit_body,
     buffer[offset++] = '\r';
     buffer[offset++] = '\n';
 
-    if (!omit_body && response->body_length > 0 && response->body != NULL) {
-        memcpy(buffer + offset, response->body, response->body_length);
-        offset += response->body_length;
-    }
-
     if (offset != total) {
         free(buffer);
         return -1;
     }
 
-    /* Trailing NUL is for convenience (strstr in tests/debugging); wire length
-     * excludes it. HTTP bodies are still length-based, not C-string-based. */
     buffer[total] = '\0';
+    *out_buffer = buffer;
+    *out_length = total;
+    return 0;
+}
+
+int http_response_serialize(const http_response_t *response, int omit_body,
+                            unsigned char **out_buffer, size_t *out_length) {
+    if (response == NULL || out_buffer == NULL || out_length == NULL) {
+        return -1;
+    }
+    *out_buffer = NULL;
+    *out_length = 0;
+
+    unsigned char *headers = NULL;
+    size_t headers_len = 0;
+    if (http_response_serialize_headers(response, &headers, &headers_len) != 0) {
+        return -1;
+    }
+
+    int include_memory_body = !omit_body && response->body_kind == HTTP_BODY_MEMORY &&
+                              response->body_length > 0 && response->body != NULL;
+
+    if (!include_memory_body) {
+        *out_buffer = headers;
+        *out_length = headers_len;
+        return 0;
+    }
+
+    size_t total = headers_len + response->body_length;
+    unsigned char *buffer = malloc(total + 1);
+    if (buffer == NULL) {
+        free(headers);
+        return -1;
+    }
+    memcpy(buffer, headers, headers_len);
+    memcpy(buffer + headers_len, response->body, response->body_length);
+    buffer[total] = '\0';
+    free(headers);
 
     *out_buffer = buffer;
     *out_length = total;
     return 0;
 }
 
+static int send_file_body(int client_fd, int file_fd, size_t length) {
+    if (length == 0) {
+        return 0;
+    }
+
+#ifdef __linux__
+    {
+        off_t offset = 0;
+        size_t remaining = length;
+        while (remaining > 0) {
+            ssize_t n = sendfile(client_fd, file_fd, &offset, remaining);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                /* Fall through to portable path on unsupported/erroneous cases
+                 * that may not have advanced offset (e.g. some EINVAL). */
+                if (offset == 0 && (errno == EINVAL || errno == ENOSYS)) {
+                    break;
+                }
+                return -1;
+            }
+            if (n == 0) {
+                /* Unexpected EOF before declared Content-Length. */
+                errno = EIO;
+                return -1;
+            }
+            remaining = length - (size_t)offset;
+        }
+        if (offset == (off_t)length) {
+            return 0;
+        }
+        /* If sendfile partially progressed then failed into fallback, seek. */
+        if (lseek(file_fd, offset, SEEK_SET) < 0) {
+            return -1;
+        }
+        length = remaining;
+    }
+#endif
+
+    unsigned char chunk[HTTP_STATIC_SEND_CHUNK];
+    size_t remaining = length;
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        ssize_t nr;
+        do {
+            nr = read(file_fd, chunk, want);
+        } while (nr < 0 && errno == EINTR);
+
+        if (nr < 0) {
+            return -1;
+        }
+        if (nr == 0) {
+            errno = EIO;
+            return -1;
+        }
+
+        if (send_all(client_fd, chunk, (size_t)nr) < 0) {
+            return -1;
+        }
+        remaining -= (size_t)nr;
+    }
+    return 0;
+}
+
 int http_response_send(int client_fd, const http_response_t *response, int omit_body) {
-    unsigned char *wire = NULL;
-    size_t wire_len = 0;
-    if (http_response_serialize(response, omit_body, &wire, &wire_len) != 0) {
+    if (response == NULL) {
         return -1;
     }
 
-    ssize_t sent = send_all(client_fd, wire, wire_len);
-    free(wire);
-    return (sent < 0) ? -1 : 0;
+    unsigned char *headers = NULL;
+    size_t headers_len = 0;
+    if (http_response_serialize_headers(response, &headers, &headers_len) != 0) {
+        return -1;
+    }
+
+    if (send_all(client_fd, headers, headers_len) < 0) {
+        free(headers);
+        return -1;
+    }
+    free(headers);
+
+    if (omit_body) {
+        return 0;
+    }
+
+    if (response->body_kind == HTTP_BODY_MEMORY) {
+        if (response->body_length == 0) {
+            return 0;
+        }
+        if (response->body == NULL) {
+            return -1;
+        }
+        return (send_all(client_fd, response->body, response->body_length) < 0) ? -1 : 0;
+    }
+
+    if (response->body_kind == HTTP_BODY_FILE) {
+        if (response->file_fd < 0) {
+            return -1;
+        }
+        return send_file_body(client_fd, response->file_fd, response->body_length);
+    }
+
+    return 0;
 }

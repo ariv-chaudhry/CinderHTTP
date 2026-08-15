@@ -69,8 +69,10 @@ CFLAGS_MARKER := $(BUILD_DIR)/.cflags
 
 .DEFAULT_GOAL := all
 
+PROFILE_CFLAGS := $(COMMON_CFLAGS) -O2 -g
+
 .PHONY: all debug test integration sanitize valgrind fuzz coverage benchmark \
-	benchmark-test clean run format help FORCE
+	benchmark-test benchmark-api benchmark-static profile clean run format help FORCE
 
 all: $(TARGET)
 
@@ -102,6 +104,16 @@ $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR)/tests:
 debug: CFLAGS := $(DEBUG_CFLAGS)
 debug: LDFLAGS := $(DEBUG_LDFLAGS)
 debug: $(TARGET)
+
+# Optimized binary with symbols for external profilers (perf, etc.).
+profile: CFLAGS := $(PROFILE_CFLAGS)
+profile: LDFLAGS :=
+profile: $(TARGET)
+	@echo "profile: built $(TARGET) with $(PROFILE_CFLAGS)"
+	@echo "Example (Linux, if perf is installed):"
+	@echo "  ./$(TARGET) --port 8080 &"
+	@echo "  perf record -g -- curl -s http://127.0.0.1:8080/api/health >/dev/null"
+	@echo "  perf report"
 
 # When both goals appear on the same command line, apply sanitizer flags to
 # everything in this make run (including test binaries).
@@ -141,10 +153,19 @@ benchmark-test:
 	@cd benchmarks && python3 -m unittest test_benchmark.py -v
 
 # Always rebuild/link the optimized release binary before load tests so a prior
-# `make debug` cannot leave ASan/UBSan objects in the benchmarked executable.
+# `make debug` / `make profile` cannot leave instrumented objects in the binary.
 benchmark:
 	$(MAKE) all CFLAGS="$(RELEASE_CFLAGS)" LDFLAGS=""
 	python3 benchmarks/benchmark.py $(BENCH_ARGS)
+
+# Convenience static workload using generated fixtures (ignored by git).
+benchmark-static:
+	$(MAKE) all CFLAGS="$(RELEASE_CFLAGS)" LDFLAGS=""
+	python3 benchmarks/benchmark.py --generate-fixtures --fixture-size 1m $(BENCH_ARGS)
+
+benchmark-api:
+	$(MAKE) all CFLAGS="$(RELEASE_CFLAGS)" LDFLAGS=""
+	python3 benchmarks/benchmark.py --path /api/health $(BENCH_ARGS)
 
 sanitize: test
 	@echo "sanitize: ASan/UBSan unit tests completed"
@@ -200,14 +221,17 @@ help:
 	@echo "  make debug       - ASan/UBSan debug build -> $(TARGET)"
 	@echo "  make debug test  - ASan/UBSan build + unit tests (same make run)"
 	@echo "  make sanitize    - ASan/UBSan unit tests (convenience alias)"
+	@echo "  make profile     - -O2 -g binary suitable for perf (not ASan)"
 	@echo "  make test        - build and run unit tests (+ benchmark parser tests)"
 	@echo "  make benchmark-test - Python unittest for benchmark parsers only"
-	@echo "  make benchmark   - release build + Stage 8 load harness (needs wrk/hey/ab)"
+	@echo "  make benchmark   - release build + load harness (needs wrk/hey/ab)"
 	@echo "                     override flags: make benchmark BENCH_ARGS='--duration 5'"
+	@echo "  make benchmark-api    - API workload shortcut"
+	@echo "  make benchmark-static - generate fixtures + 1 MiB static workload"
 	@echo "  make fuzz        - deterministic parser fuzz (default 50000 iters)"
 	@echo "  make coverage    - rebuild unit tests with gcov and print summary"
 	@echo "  make valgrind    - run unit tests under Valgrind (if installed)"
-	@echo "  make integration - run live Stage 2–7 integration checks"
+	@echo "  make integration - live integration (Stages 2–10)"
 	@echo "  make run         - build and run the server with default config"
 	@echo "  make format      - format sources with clang-format, if installed"
 	@echo "  make clean       - remove build/ and bin/"

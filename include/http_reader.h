@@ -1,8 +1,8 @@
 /*
  * http_reader.h - connection-level HTTP request framing over a TCP byte stream.
  *
- * Stage 9: a stateful reader accumulates recv() bytes, extracts exactly one
- * complete request at a time, and retains any leftover bytes for the next call.
+ * A stateful reader accumulates recv() bytes, extracts exactly one complete
+ * request at a time, and retains leftover bytes for the next call.
  *
  * Ownership:
  *   - http_reader_t owns its internal accumulation buffer.
@@ -10,9 +10,12 @@
  *     message; the caller must free() it. Leftovers stay inside the reader.
  *   - The reader never closes client_fd.
  *
- * Idle keep-alive (no bytes yet for the next request) + SO_RCVTIMEO →
- * HTTP_READ_TIMEOUT with no buffer. Partial request + timeout → also
- * HTTP_READ_TIMEOUT (caller may send 408).
+ * Timeouts (Stage 10):
+ *   - keep_alive_timeout_sec: idle wait before the next request begins
+ *     (reader buffer empty). Expiry → HTTP_READ_TIMEOUT with empty buffer.
+ *   - request_timeout_sec: wall-clock deadline (CLOCK_MONOTONIC) once any
+ *     bytes of the current request are present. Expiry → HTTP_READ_TIMEOUT
+ *     (caller may send 408).
  */
 #ifndef CINDERHTTP_HTTP_READER_H
 #define CINDERHTTP_HTTP_READER_H
@@ -43,14 +46,18 @@ void http_reader_destroy(http_reader_t *reader);
 /*
  * Extract the next complete HTTP request from the connection.
  * May return immediately from buffered leftovers without calling recv().
+ *
+ * keep_alive_timeout_sec / request_timeout_sec must be >= 1 for timed waits.
  */
 http_read_result_t http_reader_next_request(http_reader_t *reader, int client_fd,
                                             unsigned char **request_data,
-                                            size_t *request_length);
+                                            size_t *request_length,
+                                            int keep_alive_timeout_sec,
+                                            int request_timeout_sec);
 
 /*
  * One-shot helper: read a single request then discard any leftovers.
- * Prefer http_reader_next_request for persistent connections.
+ * Uses a large keep-alive/request timeout suitable for tests/socketpairs.
  */
 http_read_result_t http_read_request(int client_fd, unsigned char **buffer,
                                      size_t *buffer_length);

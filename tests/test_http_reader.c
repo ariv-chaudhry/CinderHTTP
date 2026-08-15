@@ -313,14 +313,14 @@ static void test_coalesced_two_requests(void) {
 
     unsigned char *buf1 = NULL;
     size_t len1 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(buf1 != NULL);
     ASSERT_TRUE(memcmp(buf1, "GET /api/health", 15) == 0);
     free(buf1);
 
     unsigned char *buf2 = NULL;
     size_t len2 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(buf2 != NULL);
     ASSERT_TRUE(memcmp(buf2, "GET /api/stats", 14) == 0);
     free(buf2);
@@ -344,14 +344,14 @@ static void test_post_then_get_coalesced(void) {
 
     unsigned char *buf1 = NULL;
     size_t len1 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(len1 >= 5);
     ASSERT_TRUE(memcmp(buf1 + len1 - 5, "hello", 5) == 0);
     free(buf1);
 
     unsigned char *buf2 = NULL;
     size_t len2 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(memcmp(buf2, "GET /api/health", 15) == 0);
     free(buf2);
 
@@ -389,7 +389,7 @@ static void test_partial_second_then_complete(void) {
     http_reader_init(&reader);
     unsigned char *buf1 = NULL;
     size_t len1 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf1, &len1, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(memcmp(buf1, "GET /a ", 7) == 0);
     free(buf1);
     ASSERT_EQ(pthread_join(tid, NULL), 0);
@@ -399,7 +399,7 @@ static void test_partial_second_then_complete(void) {
 
     unsigned char *buf2 = NULL;
     size_t len2 = 0;
-    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2), HTTP_READ_OK);
+    ASSERT_EQ(http_reader_next_request(&reader, fds[1], &buf2, &len2, 5, 5), HTTP_READ_OK);
     ASSERT_TRUE(memcmp(buf2, "GET /b ", 7) == 0);
     free(buf2);
 
